@@ -216,11 +216,13 @@ static bool ggml_cannge_build_node(ggml_cannge_build_context & ctx, ggml_tensor 
             // the fused RmsNorm kernel drops rows of the output on small
             // shapes (seen on 310P3), build it from primitives instead:
             // y = x * rsqrt(mean(x*x, axis=-1, keepdims) + eps)
+            // ReduceMean: x/axes are required inputs, keep_dims an optional
+            // attr; axes is a 1-D int32/int64 tensor
+            // ge 仓 tests/st/graph/compiler/testcase/eager_style_graph_builder/all_ops.cpp:39019-39048 @00ecb5c
+            // include/es/es_ReduceMean.h
             const int nd = ggml_n_dims(src0);
             std::vector<int64_t> axes = { (int64_t) nd - 1 }; // GE: last axis
-            cannge_es::EsTensorHolder axes_h(cannge_es::EsCreateConstV2<int64_t>(
-                ctx.builder.GetCGraphBuilder(), axes.data(), axes.data(), (int64_t) axes.size(), ge::DT_INT64));
-            auto ms = cannge_es::ReduceMean(cannge_es::Square(es0), axes_h, true);
+            auto ms = cannge_es::ReduceMean(cannge_es::Square(es0), ctx.builder.CreateVector(axes), true);
             auto den = cannge_es::Rsqrt(cannge_es::Add(ms, ctx.builder.CreateScalar(eps)));
             auto out = cannge_es::Mul(es0, den);
             ctx.tensors[node] = out;

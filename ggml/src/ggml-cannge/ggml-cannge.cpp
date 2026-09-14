@@ -294,7 +294,7 @@ static bool ggml_backend_cannge_graph_env_enabled() {
 // zero-copy binding of a ggml tensor to a gert::Tensor; the device address is
 // the ggml tensor data pointer (views already include their offset), the
 // storage shape follows the GE outermost-first axis order
-static bool ggml_cannge_bind_tensor(ggml_tensor * t, gert::Tensor & tensor) {
+static bool ggml_cannge_bind_tensor(ggml_tensor * t, gert::Tensor & tensor, void * dev_ptr) {
     ge::DataType dt;
     if (!ggml_cannge_ge_dtype(t->type, dt)) {
         GGML_LOG_ERROR("%s: unsupported dtype %d of tensor %s\n", __func__, (int) t->type, t->name);
@@ -313,8 +313,14 @@ static bool ggml_cannge_bind_tensor(ggml_tensor * t, gert::Tensor & tensor) {
     tensor.SetStorageFormat(ge::FORMAT_ND);
     tensor.SetPlacement(gert::TensorPlacement::kOnDeviceHbm);
     tensor.SetDataType(dt);
-    tensor.SetData(gert::TensorData((uint8_t *) t->data, nullptr, ggml_nbytes(t), gert::TensorPlacement::kOnDeviceHbm));
+    tensor.SetData(gert::TensorData((uint8_t *) dev_ptr, nullptr, ggml_nbytes(t), gert::TensorPlacement::kOnDeviceHbm));
     return true;
+}
+
+ggml_cannge_plan::~ggml_cannge_plan() {
+    for (void * p : staging) {
+        aclrtFree(p);
+    }
 }
 
 static enum ggml_status ggml_backend_cannge_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph) {
@@ -421,14 +427,57 @@ static enum ggml_status ggml_backend_cannge_graph_compute(ggml_backend_t backend
         outputs.reserve(io.output_tensors.size());
         for (ggml_tensor * t : io.inputs) {
             gert::Tensor tensor;
-            if (!ggml_cannge_bind_tensor(t, tensor)) {
+            if (!ggml_cannge_bind_tensor(t, tensor, t->data)) {
                 return GGML_STATUS_FAILED;
             }
             inputs.push_back(std::move(tensor));
         }
-        for (ggml_tensor * t : io.output_tensors) {
+        // output ports whose device range overlaps an input range (aliased
+        // views, e.g. PERMUTE of an input) must not be bound in place: GE
+        // treats undeclared input/output overlap as unvalidated UB and may
+        // silently skip the output write (ge 仓 runtime/v2/kernel/
+        // common_kernel_impl/memory_copy.cc:574-579 TensorToOut, src==dst
+        // case, @00ecb5c). The declared in-place channel
+        // ge.exec.outputReuseInputMemIndexes requires exact address equality,
+        // which offset views do not satisfy (ge 仓 docs/zh/design/features/
+        // memory_management.md:139-167 @00ecb5c). Bind a backend-held staging
+        // buffer instead and copy back on the same stream after execute.
+        struct range {
+            const uint8_t * lo;
+            const uint8_t * hi;
+        };
+        std::vector<range> input_ranges;
+        input_ranges.reserve(io.inputs.size());
+        for (ggml_tensor * t : io.inputs) {
+            input_ranges.push_back({ (const uint8_t *) t->data, (const uint8_t *) t->data + ggml_nbytes(t) });
+        }
+        if (plan->staging.size() < io.output_tensors.size()) {
+            plan->staging.resize(io.output_tensors.size(), nullptr);
+        }
+        std::vector<size_t> staged_ports;
+        for (size_t i = 0; i < io.output_tensors.size(); i++) {
+            ggml_tensor * t = io.output_tensors[i];
+            const uint8_t * lo = (const uint8_t *) t->data;
+            const uint8_t * hi = lo + ggml_nbytes(t);
+            bool overlaps = false;
+            for (const range & r : input_ranges) {
+                overlaps = lo < r.hi && r.lo < hi;
+                if (overlaps) {
+                    break;
+                }
+            }
+            void * dev_ptr = t->data;
+            if (overlaps) {
+                if (plan->staging[i] == nullptr && aclrtMalloc(&plan->staging[i], ggml_nbytes(t), ACL_MEM_MALLOC_HUGE_FIRST) != ACL_SUCCESS) {
+                    GGML_LOG_ERROR("%s: failed to allocate staging buffer for output %s (%zu bytes)\n", __func__, t->name,
+                                   ggml_nbytes(t));
+                    return GGML_STATUS_FAILED;
+                }
+                dev_ptr = plan->staging[i];
+                staged_ports.push_back(i);
+            }
             gert::Tensor tensor;
-            if (!ggml_cannge_bind_tensor(t, tensor)) {
+            if (!ggml_cannge_bind_tensor(t, tensor, dev_ptr)) {
                 return GGML_STATUS_FAILED;
             }
             outputs.push_back(std::move(tensor));
@@ -438,6 +487,15 @@ static enum ggml_status ggml_backend_cannge_graph_compute(ggml_backend_t backend
             GGML_LOG_ERROR("%s: execute failed: %s\n", __func__, err.c_str());
             plan->state = ggml_cannge_plan::FAILED;
             return GGML_STATUS_FAILED;
+        }
+
+        // aliased output ports: D2D copy from staging into the real ggml
+        // buffer on the same stream, ordered after the graph; no internal
+        // sync, ggml calls ggml_backend_synchronize
+        for (size_t i : staged_ports) {
+            ggml_tensor * t = io.output_tensors[i];
+            ACL_CHECK(aclrtMemcpyAsync(t->data, ggml_nbytes(t), plan->staging[i], ggml_nbytes(t),
+                                       ACL_MEMCPY_DEVICE_TO_DEVICE, ctx->stream));
         }
 
         // side-effect writebacks (future SET support): D2D copy back on the
@@ -541,6 +599,14 @@ static bool ggml_backend_cannge_device_supports_op(ggml_backend_dev_t dev, const
         return true;
     }
 
+    // in-place variants write the result back into src[i]'s buffer; GE
+    // drops aliased output writes (910B silent, note-10 F1)
+    for (int i = 0; i < GGML_MAX_SRC; i++) {
+        if (op->src[i] == op) {
+            return false;
+        }
+    }
+
     const struct ggml_tensor * src0 = op->src[0];
     const struct ggml_tensor * src1 = op->src[1];
 
@@ -596,6 +662,17 @@ static bool ggml_backend_cannge_device_supports_op(ggml_backend_dev_t dev, const
             }
             if (src0->ne[0] != src1->ne[0]) {
                 return false; // contraction dim mismatch
+            }
+            // 32-byte alignment of M/N/K: not in the op spec (the aclnn spec
+            // has no alignment constraint and allows non-contiguous inputs),
+            // but the GE graph-compile tiling path hard-fails unaligned
+            // MatMul shapes (CheckDimsAligned310P, EZ9999) on 310P and 910B
+            // alike; reject conservatively, product-independent. 未文档化，
+            // 依据见 note-10 F3
+            // spec: <https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/latest/API/aolapi/context/ops-nn/aclnnMatmul.md>
+            const size_t align_elems = 32 / ggml_type_size(src0->type);
+            if (src0->ne[0] % align_elems != 0 || src0->ne[1] % align_elems != 0 || src1->ne[1] % align_elems != 0) {
+                return false;
             }
             // 2D only for now, batched (>2D) mul_mat lands later
             return ggml_n_dims(src0) == 2 && ggml_n_dims(src1) == 2;

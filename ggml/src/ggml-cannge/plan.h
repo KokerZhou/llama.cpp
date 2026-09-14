@@ -79,6 +79,14 @@ struct ggml_cannge_plan {
     uint32_t    graph_id = 0;
     size_t      mem_estimate = 0;
     uint64_t    seq = 0; // insertion sequence for oldest-first cache eviction
+
+    // staging buffers for output ports whose address range overlaps an input
+    // (aliased views, e.g. PERMUTE of an input): GE writes here, a post-
+    // execute D2D copy lands the data in the real ggml buffer; one slot per
+    // output port, lazily allocated (sizes are fixed per signature)
+    std::vector<void *> staging;
+
+    ~ggml_cannge_plan(); // frees staging, defined where ACL is available
 };
 
 // walk the view_src chain down to the root tensor (shared with the build step)

@@ -70,11 +70,17 @@ static bool ggml_cannge_plan_record_io(ggml_cannge_plan_io & io, ggml_tensor * t
 bool ggml_cannge_plan_analyze(ggml_cgraph * cgraph, ggml_cannge_plan_io & io, std::string & err) {
     const int n_nodes = cgraph->n_nodes;
 
-    // producers: every node produces its own output tensor
+    // producers: every node produces its own output tensor; a CPY node also
+    // produces its write destination (src[1], which it views): registering
+    // the dst as an input would bind it read-only and the cast output port
+    // would alias an input buffer, which GE drops on write (910B silent)
     std::unordered_map<ggml_tensor *, bool> produced;
     std::unordered_map<ggml_tensor *, int>  n_consumers;
     for (int i = 0; i < n_nodes; i++) {
         produced[cgraph->nodes[i]] = true;
+        if (cgraph->nodes[i]->op == GGML_OP_CPY && cgraph->nodes[i]->src[1] != nullptr) {
+            produced[cgraph->nodes[i]->src[1]] = true;
+        }
     }
     for (int i = 0; i < n_nodes; i++) {
         ggml_tensor * node = cgraph->nodes[i];
@@ -126,13 +132,15 @@ bool ggml_cannge_plan_analyze(ggml_cgraph * cgraph, ggml_cannge_plan_io & io, st
             continue;
         }
         if (n_consumers[node] == 0 || (node->flags & GGML_TENSOR_FLAG_OUTPUT)) {
-            // a view that aliases an external input needs no GE output port:
-            // consumers read the input buffer through the view strides, the
-            // data is already there (the scheduler avoids splitting at views,
-            // so this stays an alias-only case)
+            // a DENSE view that aliases an external input needs no GE output
+            // port: consumers read the input buffer through the view strides,
+            // the data is already there (the scheduler avoids splitting at
+            // views, so this stays an alias-only case). A non-dense view
+            // (PERMUTE/TRANSPOSE strides) must be materialized by GE, its
+            // bytes are not present at data in dense order
             if (node->view_src != nullptr) {
                 ggml_cannge_view_info info;
-                if (ggml_cannge_resolve_view(node, info) && is_input.count(info.base)) {
+                if (ggml_cannge_resolve_view(node, info) && info.is_dense && is_input.count(info.base)) {
                     io.io_views.emplace_back(node, info);
                     continue;
                 }
