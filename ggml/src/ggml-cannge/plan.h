@@ -47,6 +47,14 @@ struct ggml_cannge_writeback {
     ggml_tensor * dst = nullptr; // tensor whose device address must receive it
 };
 
+// KV cache row scatter (GGML_OP_SET_ROWS): dst view of the cache, data the new
+// rows, idx the I32 slot positions; applied as D2D row copies after execute
+struct ggml_cannge_set_rows_op {
+    ggml_tensor * dst  = nullptr; // src[2] of the node, the cache view
+    ggml_tensor * data = nullptr; // src[0], contiguous rows
+    ggml_tensor * idx  = nullptr; // src[1], I32 indices
+};
+
 // per-call IO analysis: holds fresh ggml_tensor pointers and is rebuilt on
 // every graph_compute, the compute context (and its tensors) may be freed
 // between calls
@@ -57,12 +65,21 @@ struct ggml_cannge_plan_io {
 
     std::vector<std::pair<ggml_tensor *, ggml_cannge_view_info>> io_views;
 
+    std::vector<bool> input_staged; // parallel to inputs: non-dense input, copied
+                                    // into a dense staging buffer before execute
+
+    std::vector<char> output_strided; // parallel to outputs: non-dense boundary
+                                      // output (e.g. a PERMUTE as graph result),
+                                      // GE writes dense staging, copied back
+                                      // strided after execute
+
     std::vector<ggml_tensor *> output_tensors;     // one per SetOutput port, bind order
     std::vector<ggml_cannge_writeback> writebacks; // executed after the graph, same stream
+    std::vector<ggml_cannge_set_rows_op> set_rows; // KV scatter, after the graph
 
-    // TODO(needs_staging): non-dense IO (e.g. a PERMUTE consumed across the
-    // graph boundary) currently fails the build; staged copies + writeback
-    // handling land with the staging mechanism
+    // non-dense inputs are staged into dense buffers at execute time; non-dense
+    // outputs (a PERMUTE as graph boundary) still fail the build, output-side
+    // staging is a later phase
 
     bool   needs_staging = false; // some IO is not row-major dense
     size_t mem_estimate = 0;
@@ -86,7 +103,11 @@ struct ggml_cannge_plan {
     // output port, lazily allocated (sizes are fixed per signature)
     std::vector<void *> staging;
 
-    ~ggml_cannge_plan(); // frees staging, defined where ACL is available
+    // dense copies of non-dense inputs (strided views), filled by a pre-execute
+    // D2D copy on the compute stream; one slot per input, nullptr when direct
+    std::vector<void *> input_staging;
+
+    ~ggml_cannge_plan(); // frees all staging, defined where ACL is available
 };
 
 // walk the view_src chain down to the root tensor (shared with the build step)

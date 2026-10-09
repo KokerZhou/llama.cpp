@@ -89,7 +89,7 @@ if (CANN_INSTALL_DIR)
 
     # ge_runner: GE session API, graph: GE IR objects, ES authoring libs
     target_link_libraries(ggml-cannge PRIVATE ascendcl ge_runner graph
-                          es_math es_nn eager_style_graph_builder_base)
+                          es_math es_nn es_transformer eager_style_graph_builder_base)
 
     if (SOC_TYPE)
         target_compile_definitions(ggml-cannge PRIVATE ${SOC_TYPE_COMPILE_OPTION})

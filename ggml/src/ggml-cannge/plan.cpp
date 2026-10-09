@@ -22,6 +22,7 @@
 
 #include "plan.h"
 
+#include "ggml-backend.h"
 #include "ggml-impl.h"
 
 #include <cstring>
@@ -70,6 +71,14 @@ static bool ggml_cannge_plan_record_io(ggml_cannge_plan_io & io, ggml_tensor * t
 bool ggml_cannge_plan_analyze(ggml_cgraph * cgraph, ggml_cannge_plan_io & io, std::string & err) {
     const int n_nodes = cgraph->n_nodes;
 
+    if (getenv("GGML_CANNGE_DEBUG_BUILD")) {
+        fprintf(stderr, "[DBG-ANALYZE] graph n_nodes=%d\n", n_nodes);
+        for (int i = 0; i < n_nodes; i++) {
+            fprintf(stderr, "[DBG-ANALYZE]   node[%d] %s op=%s\n", i, cgraph->nodes[i]->name,
+                    ggml_op_name(cgraph->nodes[i]->op));
+        }
+    }
+
     // producers: every node produces its own output tensor; a CPY node also
     // produces its write destination (src[1], which it views): registering
     // the dst as an input would bind it read-only and the cast output port
@@ -109,8 +118,13 @@ bool ggml_cannge_plan_analyze(ggml_cgraph * cgraph, ggml_cannge_plan_io & io, st
             // CPY src[1] is the write destination (the node views it), not a
             // read input: registering it as an input would turn the dst into
             // an external read-only buffer and the cast result would get no
-            // GE output port
+            // GE output port. SET_ROWS src[1] is the index tensor, consumed by
+            // the backend scatter after execute, never by GE (also keeps I64
+            // indices away from the GE input dtype check)
             if (node->op == GGML_OP_CPY && j == 1) {
+                continue;
+            }
+            if (node->op == GGML_OP_SET_ROWS && j == 1) {
                 continue;
             }
             if (!ggml_is_empty(src) && !produced.count(src) && !seen_input.count(src)) {
@@ -131,6 +145,12 @@ bool ggml_cannge_plan_analyze(ggml_cgraph * cgraph, ggml_cannge_plan_io & io, st
         if (ggml_is_empty(node)) {
             continue;
         }
+        // sentinel leafs (op NONE, added by test-backend-ops for overflow checks)
+        // have no producing op and no GE port: their buffer is harness-owned and
+        // must stay untouched, registering them as outputs breaks the build
+        if (node->op == GGML_OP_NONE) {
+            continue;
+        }
         if (n_consumers[node] == 0 || (node->flags & GGML_TENSOR_FLAG_OUTPUT)) {
             // a DENSE view that aliases an external input needs no GE output
             // port: consumers read the input buffer through the view strides,
@@ -149,7 +169,8 @@ bool ggml_cannge_plan_analyze(ggml_cgraph * cgraph, ggml_cannge_plan_io & io, st
         }
     }
 
-    // side effects: GGML_OP_SET writes src[0] in place, keep it observable
+    // side effects: GGML_OP_SET writes src[0] in place, keep it observable;
+    // GGML_OP_SET_ROWS scatters rows into the KV cache view after execute
     std::unordered_map<ggml_tensor *, bool> seen_side_effect;
     for (int i = 0; i < n_nodes; i++) {
         ggml_tensor * node = cgraph->nodes[i];
@@ -160,16 +181,23 @@ bool ggml_cannge_plan_analyze(ggml_cgraph * cgraph, ggml_cannge_plan_io & io, st
             seen_side_effect[node->src[0]] = true;
             io.side_effects.push_back(node->src[0]);
         }
+        if (node->op == GGML_OP_SET_ROWS && node->src[0] != nullptr && node->src[1] != nullptr &&
+            node->src[2] != nullptr) {
+            io.set_rows.push_back({ node->src[2], node->src[0], node->src[1] });
+        }
     }
 
     // GE output ports, in the exact registration order of the build step:
-    // same-dtype CPY with a distinct destination buffer first (node order, the
-    // build aliases the node to its source and forces a port so GE writes the
-    // destination), then boundary outputs, deduplicated
+    // same-dtype CPY/DUP with a distinct destination buffer first (node order,
+    // the build aliases the node to its source and forces a port so GE writes
+    // the destination), then boundary outputs, deduplicated
     std::unordered_map<ggml_tensor *, bool> seen_output;
     for (int i = 0; i < n_nodes; i++) {
         ggml_tensor * node = cgraph->nodes[i];
-        if (ggml_is_empty(node) || node->op != GGML_OP_CPY || node->src[0] == nullptr) {
+        if (ggml_is_empty(node) || node->src[0] == nullptr) {
+            continue;
+        }
+        if (node->op != GGML_OP_CPY && node->op != GGML_OP_DUP) {
             continue;
         }
         if (node->type == node->src[0]->type && node->data != node->src[0]->data) {
@@ -184,15 +212,45 @@ bool ggml_cannge_plan_analyze(ggml_cgraph * cgraph, ggml_cannge_plan_io & io, st
         }
     }
 
-    for (ggml_tensor * t : io.inputs) {
-        if (!ggml_cannge_plan_record_io(io, t, err)) {
-            return false;
+    io.input_staged.assign(io.inputs.size(), false);
+    if (getenv("GGML_CANNGE_DEBUG_BUILD")) {
+        for (size_t i = 0; i < io.inputs.size(); i++) {
+            fprintf(stderr, "[DBG-ANALYZE]   input[%zu] %s op=%s\n", i, io.inputs[i]->name,
+                    ggml_op_name(io.inputs[i]->op));
         }
     }
-    for (ggml_tensor * t : io.outputs) {
-        if (!ggml_cannge_plan_record_io(io, t, err)) {
+    for (size_t i = 0; i < io.inputs.size(); i++) {
+        ggml_tensor * t = io.inputs[i];
+        ggml_cannge_view_info info;
+        if (!ggml_cannge_resolve_view(t, info)) {
+            err = "broken view chain";
             return false;
         }
+        if (!info.is_dense) {
+            // strided input (e.g. a PERMUTE consumed across the graph boundary):
+            // staged into a dense buffer before execute, see ggml-cannge.cpp
+            io.input_staged[i] = true;
+        } else if (t->buffer != nullptr && ggml_backend_buffer_is_host(t->buffer)) {
+            // dense but host-resident (CPU fallback outputs, rope positions):
+            // GE inputs must be device pointers, stage it too
+            io.input_staged[i] = true;
+        }
+        io.io_views.emplace_back(t, info);
+    }
+    io.output_strided.assign(io.outputs.size(), 0);
+    for (size_t i = 0; i < io.outputs.size(); i++) {
+        ggml_tensor * t = io.outputs[i];
+        ggml_cannge_view_info info;
+        if (!ggml_cannge_resolve_view(t, info)) {
+            err = "broken view chain";
+            return false;
+        }
+        if (!info.is_dense) {
+            // strided boundary output: GE emits dense into staging, a post-
+            // execute strided copy lands the data in the real view buffer
+            io.output_strided[i] = 1;
+        }
+        io.io_views.emplace_back(t, info);
     }
     for (ggml_tensor * t : io.side_effects) {
         if (!ggml_cannge_plan_record_io(io, t, err)) {
