@@ -91,138 +91,22 @@ static bool ggml_cannge_build_inputs(ggml_cannge_build_context & ctx) {
     return true;
 }
 
-// ggml GGML_OP_VIEW: alias when offset, strides and the full shape match the
-// base (e.g. the first QKV chunk has offset 0 but a smaller ne and needs the
-// Slice path); anything non-dense fails the build. The chain walk stops at the
-// highest tensor that has an ES holder: in split graphs the scheduler keeps
-// the boundary tensor (itself a view) as the graph input, so walking past it
-// to a CPU-side root would find no holder at all
+// GGML_OP_VIEW: resolve the highest registered base with the shared helper,
+// then alias, reinterpret, slice, or fail depending on density and shape.
 static bool ggml_cannge_build_view(ggml_cannge_build_context & ctx, ggml_tensor * node) {
-    // holder lookup: exact pointer first, then the registered tensor whose
-    // device buffer contains the view's data pointer (the scheduler rebases
-    // view chains onto the boundary copies, so the chain object may differ
-    // from the registered input even though the buffer is the right one)
-    auto has_holder = [&ctx](ggml_tensor * t) -> ggml_tensor * {
-        if (t == nullptr) {
-            return nullptr;
-        }
-        auto it = ctx.tensors.find(t);
-        if (it != ctx.tensors.end()) {
-            return it->first;
-        }
-        return nullptr;
-    };
-
-    ggml_tensor * base = node;
-    size_t        offset = 0;
-    std::set<ggml_tensor *> visited; // guard against chain cycles
-    visited.insert(base);
-    while (ggml_is_view(base) && base->view_src != nullptr) {
-        ggml_tensor * nxt = has_holder(base->view_src);
-        if (nxt == nullptr || visited.count(nxt)) {
-            break;
-        }
-        offset += base->view_offs;
-        base   = nxt;
-        visited.insert(base);
+    std::set<ggml_tensor *> registered;
+    for (const auto & kv : ctx.tensors) {
+        registered.insert(kv.first);
     }
-    if (!ctx.tensors.count(base) && node->data != nullptr) {
-        // chain walk dead-ends on an unregistered object: resolve the base in
-        // two tiers. Tier 1: registered tensors named like the chain parent
-        // (view_src); Tier 2: any registered tensor containing node->data.
-        // Same-buffer shapes (per-head vs merged views) share the span, so
-        // span alone cannot disambiguate: a candidate only qualifies if the
-        // view box actually fits its dims at the data-pointer offset
-        const int64_t esize = ggml_element_size(node);
-        const int   node_nd = ggml_n_dims(node);
-        auto fits = [&](const ggml_tensor * cand) {
-            const char * lo = (const char *) cand->data;
-            size_t       span = ggml_nbytes(cand);
-            if ((const char *) node->data < lo || (const char *) node->data >= lo + span) {
-                return false;
-            }
-            // full-buffer reinterpretation: a dense view covering the whole
-            // candidate buffer under a different shape (per-head vs merged)
-            const size_t node_span = (size_t) node->ne[0] * node->ne[1] * node->ne[2] * node->ne[3] * esize;
-            if ((const char *) node->data == lo && node_span == span) {
-                return true;
-            }
-            int64_t rem = (int64_t) (((const char *) node->data - lo) / esize);
-            if (rem * esize != (int64_t) ((const char *) node->data - lo)) {
-                return false;
-            }
-            const int cand_nd = ggml_n_dims(cand);
-            for (int d = 0; d < cand_nd; d++) {
-                const int64_t cand_ne = cand->ne[d];
-                const int64_t off = cand_ne > 0 ? rem % cand_ne : 0;
-                rem               = cand_ne > 0 ? rem / cand_ne : 0;
-                if (d < node_nd && off + node->ne[d] > cand_ne) {
-                    return false;
-                }
-            }
-            for (int d = cand_nd; d < node_nd; d++) {
-                // a view cannot extend a base dim with ne > 1 beyond the base
-                if (node->ne[d] != 1) {
-                    return false;
-                }
-            }
-            return rem == 0;
-        };
-        // rank candidates: a same-rank base needs only a Slice, a rank-mismatch
-        // needs Slice+Reshape (risky for GE infer); span breaks ties
-        auto rank_of = [](const ggml_tensor * t) { return ggml_n_dims(t); };
-        const ggml_tensor * best = nullptr;
-        size_t              best_span = SIZE_MAX;
-        int                 best_rank_pen = 2;
-        if (node->view_src != nullptr) {
-            for (const auto & kv : ctx.tensors) {
-                if (strcmp(kv.first->name, node->view_src->name) != 0 || !fits(kv.first)) {
-                    continue;
-                }
-                const size_t span = ggml_nbytes(kv.first);
-                const int    pen  = rank_of(kv.first) == node_nd ? 0 : 1;
-                if (pen < best_rank_pen || (pen == best_rank_pen && span < best_span)) {
-                    best          = kv.first;
-                    best_span     = span;
-                    best_rank_pen = pen;
-                }
-            }
-        }
-        if (best == nullptr) {
-            best_rank_pen = 2;
-            best_span     = SIZE_MAX;
-            for (const auto & kv : ctx.tensors) {
-                if (!fits(kv.first)) {
-                    continue;
-                }
-                const size_t span = ggml_nbytes(kv.first);
-                const int    pen  = rank_of(kv.first) == node_nd ? 0 : 1;
-                if (pen < best_rank_pen || (pen == best_rank_pen && span < best_span)) {
-                    best          = kv.first;
-                    best_span     = span;
-                    best_rank_pen = pen;
-                }
-            }
-        }
-        if (getenv("GGML_CANNGE_DEBUG_COMPILE") && best != nullptr) {
-            fprintf(stderr, "[DBG-COMPILE]   view %s: dead-end base=%s span=%zu\n", node->name, best->name, best_span);
-        }
-        if (getenv("GGML_CANNGE_DEBUG_COMPILE") && best == nullptr) {
-            fprintf(stderr, "[DBG-COMPILE]   view %s: dead-end NO CANDIDATE node_data=%p ne=%lld,%lld\n", node->name,
-                    node->data, (long long) node->ne[0], (long long) node->ne[1]);
-            for (const auto & kv : ctx.tensors) {
-                fprintf(stderr, "[DBG-COMPILE]     cand %s data=%p span=%zu fits=%d\n", kv.first->name, kv.first->data,
-                        ggml_nbytes(kv.first), (int) fits(kv.first));
-            }
-        }
-        if (best != nullptr) {
-            base   = (ggml_tensor *) best;
-            offset = (size_t) ((const char *) node->data - (const char *) best->data);
-        }
+
+    size_t        offset = 0;
+    ggml_tensor * base   = ggml_cannge_resolve_view_base(node, registered, offset);
+    if (base == nullptr || !registered.count(base)) {
+        return ctx.fail("no registered base for view " + std::string(node->name));
     }
 
     if (getenv("GGML_CANNGE_DEBUG_COMPILE")) {
-        fprintf(stderr, "[DBG-COMPILE]   view %s: walk done base=%s offset=%zu\n", node->name, base->name, offset);
+        fprintf(stderr, "[DBG-COMPILE]   view %s: resolved base=%s offset=%zu\n", node->name, base->name, offset);
     }
     cannge_es::EsTensorHolder base_holder;
     if (!ctx.get(base, base_holder)) {
@@ -241,7 +125,7 @@ static bool ggml_cannge_build_view(ggml_cannge_build_context & ctx, ggml_tensor 
     }
 
     const bool dense_rel = node->nb[0] == ggml_element_size(node);
-    bool     dense = dense_rel;
+    bool       dense = dense_rel;
     for (int i = 1; i < GGML_MAX_DIMS && dense; i++) {
         dense = node->nb[i] == node->nb[i - 1] * (size_t) node->ne[i - 1];
     }

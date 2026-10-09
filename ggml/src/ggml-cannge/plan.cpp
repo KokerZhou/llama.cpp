@@ -26,6 +26,7 @@
 #include "ggml-impl.h"
 
 #include <cstring>
+#include <set>
 #include <unordered_map>
 
 // walk the view_src chain down to the root tensor
@@ -52,6 +53,118 @@ bool ggml_cannge_resolve_view(ggml_tensor * t, ggml_cannge_view_info & info) {
         info.is_dense = info.nb[i] == info.nb[i - 1] * (size_t) t->ne[i - 1];
     }
     return true;
+}
+
+// resolve a view to a registered base tensor, mirroring build_view's chain walk
+// and tiered candidate search
+ggml_tensor * ggml_cannge_resolve_view_base(ggml_tensor * node, const std::set<ggml_tensor *> & registered, size_t & offset) {
+    offset = 0;
+    if (node == nullptr || !ggml_is_view(node)) {
+        return nullptr;
+    }
+
+    // chain walk: follow view_src while it is registered (has_holder)
+    ggml_tensor * base = node;
+    std::set<ggml_tensor *> visited;
+    visited.insert(base);
+    while (ggml_is_view(base) && base->view_src != nullptr) {
+        if (registered.find(base->view_src) == registered.end() || visited.count(base->view_src)) {
+            break;
+        }
+        offset += base->view_offs;
+        base    = base->view_src;
+        visited.insert(base);
+    }
+    if (registered.count(base)) {
+        return base;
+    }
+
+    if (node->data == nullptr) {
+        return nullptr;
+    }
+
+    const int64_t esize   = ggml_element_size(node);
+    const int     node_nd = ggml_n_dims(node);
+    const size_t  node_span = (size_t) node->ne[0] * node->ne[1] * node->ne[2] * node->ne[3] * esize;
+
+    auto fits = [&](const ggml_tensor * cand) -> bool {
+        const char * lo   = (const char *) cand->data;
+        const size_t span = ggml_nbytes(cand);
+        if ((const char *) node->data < lo || (const char *) node->data >= lo + span) {
+            return false;
+        }
+        // whole-buffer reinterpretation: same address, same byte span
+        if ((const char *) node->data == lo && node_span == span) {
+            return true;
+        }
+        int64_t rem = (int64_t) (((const char *) node->data - lo) / esize);
+        if (rem * esize != (int64_t) ((const char *) node->data - lo)) {
+            return false;
+        }
+        const int cand_nd = ggml_n_dims(cand);
+        for (int d = 0; d < cand_nd; d++) {
+            const int64_t cand_ne = cand->ne[d];
+            const int64_t off     = cand_ne > 0 ? rem % cand_ne : 0;
+            rem                   = cand_ne > 0 ? rem / cand_ne : 0;
+            if (d < node_nd && off + node->ne[d] > cand_ne) {
+                return false;
+            }
+        }
+        for (int d = cand_nd; d < node_nd; d++) {
+            if (node->ne[d] != 1) {
+                return false;
+            }
+        }
+        return rem == 0;
+    };
+
+    auto rank_of = [](const ggml_tensor * t) { return ggml_n_dims(t); };
+
+    const ggml_tensor * best = nullptr;
+    size_t              best_span = SIZE_MAX;
+    int                 best_rank_pen = 2;
+
+    // Tier 1: registered tensor whose name matches the immediate view_src
+    if (node->view_src != nullptr) {
+        for (ggml_tensor * cand : registered) {
+            if (strcmp(cand->name, node->view_src->name) != 0 || !fits(cand)) {
+                continue;
+            }
+            const size_t span = ggml_nbytes(cand);
+            const int    pen  = rank_of(cand) == node_nd ? 0 : 1;
+            if (pen < best_rank_pen || (pen == best_rank_pen && span < best_span)) {
+                best          = cand;
+                best_span     = span;
+                best_rank_pen = pen;
+            }
+        }
+    }
+
+    // Tier 2: any registered tensor whose buffer contains node->data
+    if (best == nullptr) {
+        best_rank_pen = 2;
+        best_span     = SIZE_MAX;
+        for (ggml_tensor * cand : registered) {
+            if (!fits(cand)) {
+                continue;
+            }
+            const size_t span = ggml_nbytes(cand);
+            const int    pen  = rank_of(cand) == node_nd ? 0 : 1;
+            if (pen < best_rank_pen || (pen == best_rank_pen && span < best_span)) {
+                best          = cand;
+                best_span     = span;
+                best_rank_pen = pen;
+            }
+        }
+    }
+
+    if (best != nullptr) {
+        base   = (ggml_tensor *) best;
+        offset = (size_t) ((const char *) node->data - (const char *) best->data);
+        return base;
+    }
+
+    return nullptr;
 }
 
 static bool ggml_cannge_plan_record_io(ggml_cannge_plan_io & io, ggml_tensor * t, std::string & err) {
@@ -213,6 +326,9 @@ bool ggml_cannge_plan_analyze(ggml_cgraph * cgraph, ggml_cannge_plan_io & io, st
     }
 
     io.input_staged.assign(io.inputs.size(), false);
+    io.input_base.assign(io.inputs.size(), nullptr);
+    io.input_base_offset.assign(io.inputs.size(), 0);
+    std::set<ggml_tensor *> registered;
     if (getenv("GGML_CANNGE_DEBUG_BUILD")) {
         for (size_t i = 0; i < io.inputs.size(); i++) {
             fprintf(stderr, "[DBG-ANALYZE]   input[%zu] %s op=%s\n", i, io.inputs[i]->name,
@@ -235,6 +351,10 @@ bool ggml_cannge_plan_analyze(ggml_cgraph * cgraph, ggml_cannge_plan_io & io, st
             // GE inputs must be device pointers, stage it too
             io.input_staged[i] = true;
         }
+        // resolve the registered base this view aliases; approximate the build's
+        // registered set with inputs processed so far
+        io.input_base[i] = ggml_cannge_resolve_view_base(t, registered, io.input_base_offset[i]);
+        registered.insert(t);
         io.io_views.emplace_back(t, info);
     }
     io.output_strided.assign(io.outputs.size(), 0);

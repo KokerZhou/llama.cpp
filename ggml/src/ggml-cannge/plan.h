@@ -25,6 +25,7 @@
 #include "ggml.h"
 
 #include <cstdint>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -67,6 +68,9 @@ struct ggml_cannge_plan_io {
 
     std::vector<bool> input_staged; // parallel to inputs: non-dense input, copied
                                     // into a dense staging buffer before execute
+
+    std::vector<ggml_tensor *> input_base;       // parallel to inputs: registered base a view aliases
+    std::vector<size_t>        input_base_offset; // parallel to inputs: byte offset of the view inside base
 
     std::vector<char> output_strided; // parallel to outputs: non-dense boundary
                                       // output (e.g. a PERMUTE as graph result),
@@ -112,6 +116,10 @@ struct ggml_cannge_plan {
 
 // walk the view_src chain down to the root tensor (shared with the build step)
 bool ggml_cannge_resolve_view(ggml_tensor * t, ggml_cannge_view_info & info);
+
+// resolve a view to a registered base tensor and the byte offset of its data
+// inside that base; returns nullptr if the view cannot be resolved
+ggml_tensor * ggml_cannge_resolve_view_base(ggml_tensor * node, const std::set<ggml_tensor *> & registered, size_t & offset);
 
 bool ggml_cannge_plan_analyze(ggml_cgraph * cgraph, ggml_cannge_plan_io & io, std::string & err);
 
