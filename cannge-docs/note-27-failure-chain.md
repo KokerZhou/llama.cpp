@@ -23,7 +23,11 @@ Agent A 已定位），否则几秒写爆磁盘。
 | 10 | GE E19999 Reshape 元素数不匹配 | [128,8,256] 缓存槽视图对 2D base 走 Slice+Reshape；正确解是范围盒分解（start/end 偏移沿 base 维分解，盒元素数须等于视图） | 范围盒算法（板对齐校验） |
 | 11 | strided_copy sdma error | f16 转置视图 2B 行宽/2B 对齐，SDMA 要求 ≥4B | es<4 或 nb 非 4B 对齐走宿主 bounce |
 | 12 | GE 执行期 SMMU Terminate | 密集但宿主驻留的图输入（rope pos 等）直接绑定为设备指针 | analyze 对 host buffer 输入也置 staged |
-| 13 | **当前**：D2D 拷贝 dst=0xfffd…（宿主） | SET_ROWS 散射 dst（node->src[2]）是宿主侧原对象；行拷贝方向只看了 src | **待修**：set_rows dst 宿主分支（D2H/memcpy）；输出回拷同理需核对 |
+| 13 | D2D 拷贝 dst=0xfffd…（宿主） | SET_ROWS 散射 dst（node->src[2]）是宿主侧原对象；行拷贝方向只看了 src | ✅ 已修：dst_host 四分支 |
+| 14 | TBO f16 暂存类全灭（perm1×12、vs0、DUP-perm×4） | strided_copy bounce 的**设备源输入分支数据流写反**：把未写入的暂存目标 D2H 当数据源散射 | ✅ 已修：D2H 源→宿主镜像→gather 成 dense→H2D |
+| 15 | ppl KL 对拍全失真（same-top-p=0、RMS Δp 55.6%、两次逐位一致=确定性） | 分析过程曾被我自写 python .kld 解析器的错位 bug 污染（"argmax 冻结"叙述作废，C++ 工具为唯一可信口径）；**可信结论**（vs 验证过的 ref2 基准）：CANNGE 默认配置 RMS Δp 55.6%/same-top 0%；RMS 落 CPU 恢复到 same-top 79.5% → **RMS-in-graph 是主破坏者**（孤立 RMS [2560,256] 精度完美——图集成问题）；matmul 落 CPU 无变化；全禁（DISABLE_ALL）+任何配置都无变化（后端在场即破坏，与算子无关） | 已提交 d3a3ef81f；修复进行中 |
+| 16 | GE BatchMatMulV3 权重 >256K 元素（k=n=640+，f16/f32 同病）输出静默零 | 孤立探针阶梯实证（512 过/640 灭）；已加 L0 门 262144；正路=照 JI 换 BatchMatMulV2 raw-op+显式输出 desc | 已门限，待 V2 路线 |
+| 17 | ref-cpu-4b.kld 参考文件损坏（同配置重录 ref2 后对比自证：同配置 100% 一致） | 首份参考不可用导致全部早期 KL 数字存疑；**用 ref2 重测后核心结论不变**（55.625/79.5% 逐位相同） | 教训：对拍前先验证"同配置自比=100%" |
 
 ## 当前状态
 
