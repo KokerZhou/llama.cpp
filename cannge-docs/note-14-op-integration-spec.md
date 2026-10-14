@@ -1,5 +1,10 @@
 # note-14: CANNGE 算子接入规范
 
+> **2026-10-09 状态指针**：本文 §4 的 op 清单为 28558340a 时代快照，**已大规模过时**。
+> 当前支持集以代码 supports_op 为准，差距审计见 note-21，修复与新增日志见 note-24
+> （参数化 SOFT_MAX、batched MUL_MAT、SET_ROWS、NORM、DUP、GLU、ROPE、13 个 UNARY
+> 已接入；TBO 324/333）。判定流程与纪律（§1-§3、§5）继续有效。
+
 建立：2026-09-11。规范对象：向 CANNGE 后端新增/修改 ggml op 支持的流程与契约。
 代码基线同 note-18（d85b6bd08 + F1/F2/F3 未 commit 修复）。出处分级引用遵循 note-11
 的文档来源注册表（T1 官网 / T2 cann-ops 镜像 / T3 ge 源码仓 path:line@commit /

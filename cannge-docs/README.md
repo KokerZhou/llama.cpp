@@ -26,14 +26,27 @@ cannge）；开发环境运维见 note-12。
 | note-12-dev-environment.md | 开发环境运维手册：310 长连接获取与纪律、910 npussh/npursync 快通道、本地容器与双构建纪律、凭证总则 |
 | note-13-code-style.md | 代码风格与工程纪律规范：AGENTS.md 硬规则、注释出处规范、命名、禁止 abort、提交规范 |
 | note-14-op-integration-spec.md | 算子接入规范：两层支持判定、supports_op 保守校验契约、CPY/VIEW 的 produced 注册规则、当前 op 清单及约束与出处 |
-| note-15-fallback-ladder-spec.md | 回退层次规范：L0-L6 层次职责/触发/状态、层间转移记录要求、aclnn 等价组合（L4b）与手写算子（L5）hold 条款 |
-| note-16-validation-spec.md | 验证规范：双构建流程、11-op 探针、test-backend-ops 基线口径（OK=24/FAIL=83/NS=2304）、双 SoC 流程、归档格式、已知精度特性 |
+| note-15-fallback-ladder-spec.md | 回退层次规范：**2026-10-09 用户定稿 8 档梯子**（档1 ES 原生 / 档1x 变体冻结 / 档2 ES 组合 / 档3 GE 内手写 Hold / 档4 GE 切分 / 档5 aclnn eager / 档6 aclnn 组合 / 档7 eager 手写 Hold / 档8 CPU），取代旧 L0-L6 表述 |
+| note-16-validation-spec.md | 验证规范：双构建流程、11-op 探针、test-backend-ops 基线口径（随轮次刷新，最新见 note-27）、双 SoC 流程、归档格式、已知精度特性 |
 | note-17-compatibility-versioning.md | 兼容性与版本策略：CANN 9.1 基线（9.0 hold）、16 SoC ops-info 矩阵引用、310 先行、JittorInfer 引用边界 |
 | note-18-architecture-overview.md | 架构总览：ES 构图 → GE 编译 → session 执行 → plan cache 四层、关键抽象、与 GGML_CANN 切分、GE 生命周期与异步安全、env 门 |
 | note-19-static-op-table.md | 逐 SoC 算子支持精细静态表：16 SoC ops-info 全量取证（ops-info 是 TBE 实现注册表而非支持矩阵）、17 GE 算子存在性/dtype/attr 差异矩阵、MatMul 32B 对齐专项（ops-info 无记录，维持保守拒绝）、note-16 两问取证（cubeMathType 默认值/910B F32 机制） |
 | note-20-matmul-constraint-docs.md | 310P GE 图路径 matmul 形状对齐约束的文档出处专项：graphdevg 89 页/分产品 Ascend IR 规格 zip×2/cann-ops/ge 仓/容器 .so 反汇编/网络全搜面无契约文档；闭源判据 (dim×dtype)%32 还原；最接近官方文（Ascend C ND_ALIGN N 向 32B）；文档层无解，给出最小硬件实验设计（f32 {8,24,40} 判别形状族） |
 
 编号说明：note-13 已被代码风格篇占用，架构篇编号为 note-18（内容相互独立，按主题查阅即可）。
+
+## 服务器轮文档（note-21 ~ note-29，2026-10-08/09，310 服务器侧 Kimi 产出，已合入本地）
+
+| 文件 | 内容 |
+|---|---|
+| note-21-coverage-audit.md | 算子覆盖差距审计（@28558340a 基线，TBO 注册段 + --show-coverage 实测） |
+| note-22-doc-sources.md | 文档来源整合注册表 v2（本机连通性实测、URL 转换规则；note-11 分级继续有效） |
+| note-23-fail-root-causes.md | TBO 45 FAIL 根因分桶（staging 缺口 23 / E13025 5 / 门缺口等） |
+| note-24-fix-log.md | 修复日志 F9-F13+（控制变量一批一验；含 F7 结案：310P f32 门 16 元素产品化） |
+| note-25-model-integration.md | 模型集成（Qwen3-4B 冒烟）：F14-F16+ 修复批，含 SET_ROWS 后端散射、I64 idx、宿主 f32→f16 行 cast |
+| note-26-agent-verdicts.md | 卡死三连裁决（EOF 空转/自匹配乒乓/span 平局）+ F7"病态编译"无源码依据复核 |
+| note-27-failure-chain.md | **冒烟 17 环失败根因链（F14-F17b）+ 当前唯一阻塞：RMS-in-graph 主破坏者**；方法论：指针混淆连环案按时间线抓首犯 |
+| note-29-coverage-matrix.md | Qwen 全量覆盖实验矩阵设计稿（4 模型 × 3 配置 × 3 prompt = 36 次运行，待 #13 修复后执行） |
 
 ## 使用约定
 

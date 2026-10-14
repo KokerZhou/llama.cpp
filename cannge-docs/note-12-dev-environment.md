@@ -4,8 +4,10 @@
 > `/workspace/shengjiayi/Tsinghua/.kimi-private/`（工作区侧）。home 下的
 > `~/.kimi-private` 已废弃并删除——F4 与 910 两轮归档（remote-results-310-f4、
 > remote-results-910b）因此丢失，只余 note-9/10/16 里的摘要数字，本文旧路径引用以本条为准。
-> 910 的 npussh keyring 当前损坏（`secret-tool EACCES`），用前需重新 `npussh login`
-> 或改用 cannlab-ssh 隧道。代码线收敛：远端一律通过 git（fork）对齐，不再用 rsync 整树同步。
+> 910 的 npussh keyring 曾报 `secret-tool EACCES`（2026-10-08）——**已解决（2026-10-14）**：
+> 根因是 secret-tool 不在 PATH（它存放在 `.kimi-private/tools/bin/`，系统未装 libsecret-tools）。
+> 正确 PATH = `tools/bin:tools/node22/bin:tools/npm-global/bin` 三者都加。用前
+> `npussh list` 验证；OAuth 本体有效无需重新登录。
 
 建立：2026-09-11。规范对象：CANNGE 后端（ggml/src/ggml-cannge/）开发所需的全部环境资产：
 310 长连接真机、910 快通道、本地容器、本机原生构建、外网代理。
