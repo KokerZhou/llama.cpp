@@ -187,8 +187,17 @@ bool ggml_cannge_plan_analyze(ggml_cgraph * cgraph, ggml_cannge_plan_io & io, st
     if (getenv("GGML_CANNGE_DEBUG_BUILD")) {
         fprintf(stderr, "[DBG-ANALYZE] graph n_nodes=%d\n", n_nodes);
         for (int i = 0; i < n_nodes; i++) {
-            fprintf(stderr, "[DBG-ANALYZE]   node[%d] %s op=%s\n", i, cgraph->nodes[i]->name,
-                    ggml_op_name(cgraph->nodes[i]->op));
+            fprintf(stderr, "[DBG-ANALYZE]   node[%d] %s op=%s ne=%lld,%lld,%lld,%lld", i, cgraph->nodes[i]->name,
+                    ggml_op_name(cgraph->nodes[i]->op), (long long) cgraph->nodes[i]->ne[0],
+                    (long long) cgraph->nodes[i]->ne[1], (long long) cgraph->nodes[i]->ne[2],
+                    (long long) cgraph->nodes[i]->ne[3]);
+            for (int j = 0; j < GGML_MAX_SRC; j++) {
+                ggml_tensor * s = cgraph->nodes[i]->src[j];
+                if (s != nullptr) {
+                    fprintf(stderr, " src%d=%s(%s,%lld)", j, s->name, ggml_op_name(s->op), (long long) s->ne[0]);
+                }
+            }
+            fprintf(stderr, "\n");
         }
     }
 
