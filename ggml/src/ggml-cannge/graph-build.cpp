@@ -714,6 +714,28 @@ static bool ggml_cannge_build_node(ggml_cannge_build_context & ctx, ggml_tensor 
             // the node is a view of the cache (src[2]); the write itself is
             // applied by the backend after execute, see io.set_rows
             ctx.tensors[node] = es2;
+            // the scatter data tensor is both consumed in-graph (fresh-row
+            // splice) and forced as an output port for the host scatter. In
+            // large merged graphs GE has been observed feeding such a port a
+            // different buffer than the in-graph consumers (writeback diverges
+            // while in-graph values stay correct; note-52 batch N). Add a
+            // broadcast zero to force a private materialization for the port.
+            if (src0 != nullptr && getenv("GGML_CANNGE_SR_ADD0") != nullptr) {
+                cannge_es::EsTensorHolder datah;
+                if (ctx.get(src0, datah)) {
+                    ge::DataType dt0;
+                    if (ggml_cannge_ge_dtype(src0->type, dt0)) {
+                        ge::DataType f32d;
+                        if (ggml_cannge_ge_dtype(GGML_TYPE_F32, f32d)) {
+                            auto zc = ctx.builder.CreateConst(std::vector<float>{ 0.0f }, std::vector<int64_t>{ 1, 1 });
+                            if (src0->type != GGML_TYPE_F32) {
+                                zc = cannge_es::Cast(zc, (int64_t) dt0);
+                            }
+                            ctx.tensors[src0] = cannge_es::Add(datah, zc);
+                        }
+                    }
+                }
+            }
             return true;
         }
 
