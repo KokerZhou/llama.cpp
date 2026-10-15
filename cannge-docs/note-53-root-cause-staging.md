@@ -37,5 +37,10 @@ is_weight 增加 `buffer != nullptr && ggml_backend_buffer_is_host(buffer)`—�
 
 ## 下一步（合并路径已通，转性能）
 
+## 批X 性能首测（arena + DEBUG_SIG）
+
+合并 -n 100 = 2.5 t/s，但 DBG-TIME 显示稳态 ~141ms/token（≈7 t/s）+ 编译 ~57s 摊销主导短基准。bind 占稳态 75%：arena 打包（每执行 1 次 H2D 替代 ~150 次小拷贝）后 bind 5.7s→4.35s。DEBUG_SIG 暴露关键矛盾：**运行时每 decode 步收到 ~28 个 3 节点小图（norm-N ×2），而调度器报告 1432 节点合并片**——split->graph 在运行时远小于 SCHED_DEBUG 所示，是下一个合并杠杆（查 fork 的 split 打印与运行时状态为何不一致）。
+
+
 - 合并 decode 正确但 ~0.2 t/s：瓶颈 = f32 全 cache refresh 回写流量（批P 设计）。优化方向：回写改 in-place 通道 / f16 / 只写变化行（GE outputReuse 声明）。
 - 优化后合并路径（4 片/token）预期远超分裂路径 9.4——性能战场正式转到单图执行效率。
