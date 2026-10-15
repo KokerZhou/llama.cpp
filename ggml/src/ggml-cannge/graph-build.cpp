@@ -678,6 +678,11 @@ static bool ggml_cannge_build_node(ggml_cannge_build_context & ctx, ggml_tensor 
                 return false;
             }
             if (in_graph) {
+                // batch P cache refresh: write the fresh cache in-graph as a
+                // one-hot row select over the cache input, and register the
+                // result under the cache base so every in-fragment view chain
+                // reads the post-write bytes (GE orders via the dataflow).
+                // M==1: single select; M>1: m^T @ rows as one BatchMatMulV3.
                 ge::DataType dt;
                 if (!ggml_cannge_ge_dtype(src2->type, dt)) {
                     return ctx.fail(std::string("unsupported set_rows dtype ") + node->name);
@@ -687,24 +692,55 @@ static bool ggml_cannge_build_node(ggml_cannge_build_context & ctx, ggml_tensor 
                 if (!ctx.get(src0, upd) || !ctx.get(src1, idxh)) {
                     return false;
                 }
-                // cache view {R, S} ggml -> GE {S, R}; one row: updates {1, R},
-                // indices coordinates {{slot}} {1, 1}
-                if (src0->type != src2->type) {
-                    upd = cannge_es::Cast(upd, (int64_t) dt);
+                ge::DataType f32d;
+                if (!ggml_cannge_ge_dtype(GGML_TYPE_F32, f32d)) {
+                    return ctx.fail("no GE f32 for cache refresh");
                 }
-                std::vector<int64_t> ge_v  = ggml_cannge_ge_shape(src2);
-                std::vector<int64_t> ge_up = ge_v;
-                ge_up[0]                   = 1;
-                upd                        = cannge_es::Reshape(upd, ge_up);
-                idxh                       = cannge_es::Reshape(idxh, std::vector<int64_t>{ 1, 1 });
-                // GE skips the scatter write when var is bound to a graph
-                // input (read-only zero-copy binding): copy var through a
-                // cast first so the scatter targets an op-produced tensor
-                auto var2                  = cannge_es::Cast(es2, (int64_t) ge::DT_FLOAT);
-                auto upd2                  = cannge_es::Cast(upd, (int64_t) ge::DT_FLOAT);
-                auto out                   = cannge_es::TensorScatterUpdate(var2, idxh, upd2);
-                out                        = cannge_es::Cast(out, (int64_t) dt);
-                ctx.tensors[node]          = out;
+                // cache view {R, S} ggml -> GE {S, R}; slot axis = GE dim0
+                const int64_t      S = src2->ne[1];
+                const int64_t      R = src2->ne[0];
+                const int64_t      M = src1->ne[0];
+                auto               h32 = cannge_es::Cast(es2, (int64_t) f32d);
+                cannge_es::EsTensorHolder out;
+                if (M == 1) {
+                    std::vector<float> iota(S);
+                    for (int64_t i = 0; i < S; i++) {
+                        iota[i] = (float) i;
+                    }
+                    auto arange = ctx.builder.CreateConst(iota, std::vector<int64_t>{ S });
+                    auto idxf   = cannge_es::Cast(idxh, (int64_t) f32d);
+                    auto onef   = ctx.builder.CreateConst(std::vector<float>(S, 1.0f), std::vector<int64_t>{ S });
+                    auto m1     = cannge_es::Relu(cannge_es::Sub(onef, cannge_es::Abs(cannge_es::Sub(arange, idxf))));
+                    auto m2     = cannge_es::Reshape(m1, std::vector<int64_t>{ S, 1 });
+                    auto r2     = cannge_es::Reshape(upd, std::vector<int64_t>{ 1, R });
+                    auto r32    = cannge_es::Cast(r2, (int64_t) f32d);
+                    auto one2   = ctx.builder.CreateConst(std::vector<float>(S, 1.0f), std::vector<int64_t>{ S, 1 });
+                    out         = cannge_es::Add(cannge_es::Mul(h32, cannge_es::Sub(one2, m2)), cannge_es::Mul(r32, m2));
+                } else {
+                    // m2 {Mp, S} one-hot (K padded to 8 for the GE tiling rule);
+                    // mm = m2^T @ rows -> {S, R}; out = h*(1-colsum) + mm
+                    std::vector<float> iota(S);
+                    for (int64_t i = 0; i < S; i++) {
+                        iota[i] = (float) i;
+                    }
+                    auto arange = ctx.builder.CreateConst(iota, std::vector<int64_t>{ 1, S });
+                    auto idx2   = cannge_es::Reshape(cannge_es::Cast(idxh, (int64_t) f32d), std::vector<int64_t>{ M, 1 });
+                    auto m2     = cannge_es::Cast(cannge_es::Equal(idx2, arange), (int64_t) f32d); // {M,S}
+                    const int64_t Mp = (M + 7) / 8 * 8;
+                    if (Mp != M) {
+                        auto zpad = ctx.builder.CreateConst(std::vector<float>((Mp - M) * S, 0.0f), std::vector<int64_t>{ Mp - M, S });
+                        m2 = cannge_es::Concat(ctx.builder.CreateScalar((int64_t) 0), std::vector<cannge_es::EsTensorHolder>{ m2, zpad }, 2);
+                        auto rpad = ctx.builder.CreateConst(std::vector<float>((Mp - M) * R, 0.0f), std::vector<int64_t>{ Mp - M, R });
+                        upd = cannge_es::Concat(ctx.builder.CreateScalar((int64_t) 0), std::vector<cannge_es::EsTensorHolder>{ upd, rpad }, 2);
+                    }
+                    auto cs  = cannge_es::ReduceSum(m2, ctx.builder.CreateVector(std::vector<int64_t>{ 0 }), false); // {S}
+                    auto cs2 = cannge_es::Reshape(cs, std::vector<int64_t>{ S, 1 });
+                    auto one2 = ctx.builder.CreateConst(std::vector<float>(S, 1.0f), std::vector<int64_t>{ S, 1 });
+                    auto mm  = cannge_es::BatchMatMulV3(m2, upd, nullptr, nullptr, true, false); // {S,R}
+                    out      = cannge_es::Add(cannge_es::Mul(h32, cannge_es::Sub(one2, cs2)), mm);
+                }
+                out                 = cannge_es::Cast(out, (int64_t) dt);
+                ctx.tensors[node]   = out;
                 ggml_cannge_view_info vinfo;
                 if (ggml_cannge_resolve_view(src2, vinfo)) {
                     ctx.tensors[vinfo.base] = out;

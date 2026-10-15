@@ -344,6 +344,27 @@ bool ggml_cannge_plan_analyze(ggml_cgraph * cgraph, ggml_cannge_plan_io & io, st
         is_input[t] = true;
     }
 
+    // batch P (note-52): merged-attention cache refresh. With the attention
+    // merged (CONT_NC), a SET_ROWS whose dst view's base is a device input
+    // writes the fresh cache IN-GRAPH (one-hot select, M=1 or matrix form) -
+    // the node itself becomes an output port (its ggml buffer IS the cache)
+    // and the post-execute host scatter is skipped. This replaces the
+    // Kcur/Vcur forced data ports that GE's runtime refresh mechanism
+    // collapses into one buffer when many same-shaped outputs share a graph.
+    if (getenv("GGML_CANNGE_CONT_NC") != nullptr) {
+        for (int i = 0; i < n_nodes; i++) {
+            ggml_tensor * node = cgraph->nodes[i];
+            if (ggml_is_empty(node) || node->op != GGML_OP_SET_ROWS || node->src[2] == nullptr) {
+                continue;
+            }
+            ggml_cannge_view_info dinfo;
+            if (ggml_cannge_resolve_view(node->src[2], dinfo) && is_input.count(dinfo.base)) {
+                sr_in_graph[node] = true;
+                io.outputs.push_back(node);
+            }
+        }
+    }
+
     // boundary outputs: no consumer, or explicitly flagged
     for (int i = 0; i < n_nodes; i++) {
         ggml_tensor * node = cgraph->nodes[i];
