@@ -61,6 +61,12 @@ SET_ROWS in_graph 路径已整体改用 TSU（替换 one-hot 选择 + BatchMatMu
 
 合并路径（CONT_NC）模型级仍乱码——散射既已清白，剩余嫌疑收敛到合并 fragment 的输入绑定 / holder 复用 / 每步重建图与 plan 的交互。下一步用可信 DUMP 在层 24 起点做干净二分。
 
+## 3.6c 批U 干净二分进展（可信 DUMP 时代）
+
+层间 fork：merged 的 **decode 起始 cache 内容与 split 不同**（k/v、多 layers 证实；KV 皆差）→ **合并 prefill 写入了错误缓存** → 第 24/25 层注意力即偏离（kq_soft_max-25/26/27 merged≠split 已证）→ 全链乱码。TSU 多行（M=8/9）探针字节级精确 → 机制无罪，嫌疑收敛到**模型 prefill 里 TSU 的实际输入**：upd（Vcur/Kcur 的 {1024,M} 视图——探针用的是独立张量，模型是 rope 三维输出的视图）或 idx 的 staging。下一步：比对 prefill fragment 的 TSU 输入 checksum（mrg vs spl）。
+
+注：DUMP 强制对部分张量（Kcur/Qcur/l_out-24）静默无输出（原因未查），观测工具仍有盲区。
+
 ## 3.7 批P cache-refresh（WIP，2d624231f）
 
 实现：merge 模式下 SET_ROWS 标记 in_graph，build 在 cache base {S,R} 上做 one-hot 行选择（M=1）/ m^T@rows BatchMatMulV3（M>1，K pad 8），节点自身作输出端口（buffer=cache），host scatter 退役；消费侧 splice 自动禁用（sr_for_base 跳过 in_graph）。**collapse 确证为按形状分组**：{512,1024} f16 refresh 端口逐层写回各异（不再塌）。
