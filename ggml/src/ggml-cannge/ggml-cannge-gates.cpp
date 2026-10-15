@@ -297,12 +297,12 @@ bool ggml_backend_cannge_device_supports_op(ggml_backend_dev_t dev, const ggml_t
                    ggml_is_contiguous(op);
 
         case GGML_OP_CONT:
-            // non-contiguous CONT accepted by default since the fresh-row
-            // splice makes the merged-fragment read correct (note-50 batch K):
-            // the CONT resolves to the in-GE relabel chain plus a one-hot
-            // select with the in-fragment Kcur/Vcur. GGML_CANNGE_NO_CONT_NC
-            // restores the old opt-in behavior.
-            if (getenv("GGML_CANNGE_NO_CONT_NC") != nullptr) {
+            // non-contiguous CONT opts into the merged attention
+            // (GGML_CANNGE_CONT_NC): the fresh-row splice makes the merged
+            // fragment read correct, but the 1432-node merged graph mis-executes
+            // at model scale while the isolated probe is exact - root cause
+            // under investigation (note-52). Default stays split (coherent).
+            if (getenv("GGML_CANNGE_CONT_NC") == nullptr) {
                 return src0 != nullptr && ggml_cannge_float_dtype(src0->type) && ggml_cannge_float_dtype(op->type) &&
                        ggml_is_contiguous(src0);
             }

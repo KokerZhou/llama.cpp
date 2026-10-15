@@ -355,18 +355,40 @@ static bool ggml_cannge_splice_fresh_row(ggml_cannge_build_context & ctx, ggml_t
         return false;
     }
     const int64_t S = t->ne[0];
-    cannge_es::EsTensorHolder m;
-    if (!ggml_cannge_onehot_slot(ctx, idxh, S, m, sr->idx)) {
-        return false;
+    const int64_t M = sr->idx->ne[0];
+    auto h32        = cannge_es::Cast(h, (int64_t) f32);
+    if (M == 1) {
+        // decode: single-row one-hot select
+        cannge_es::EsTensorHolder m;
+        if (!ggml_cannge_onehot_slot(ctx, idxh, S, m, sr->idx)) {
+            return false;
+        }
+        auto m3  = cannge_es::Reshape(m, std::vector<int64_t>{ 1, 1, S });
+        auto r3  = cannge_es::Reshape(rowh, std::vector<int64_t>{ t->ne[2], t->ne[1], 1 });
+        auto r32 = cannge_es::Cast(r3, (int64_t) f32);
+        auto one = ctx.builder.CreateConst(std::vector<float>(S, 1.0f), std::vector<int64_t>{ 1, 1, S });
+        h        = cannge_es::Cast(
+            cannge_es::Add(cannge_es::Mul(h32, cannge_es::Sub(one, m3)), cannge_es::Mul(r32, m3)), (int64_t) dt);
+        return true;
     }
-    auto m3 = cannge_es::Reshape(m, std::vector<int64_t>{ 1, 1, S });
-    // row GE: sr.data is the flat {D*G} cache-row view; the cont t is
-    // ggml {S,D,G} -> GE {G,D,S}, so the row splices as {G,D,1} (byte-identity)
-    auto r3 = cannge_es::Reshape(rowh, std::vector<int64_t>{ t->ne[2], t->ne[1], 1 });
-    auto h32 = cannge_es::Cast(h, (int64_t) f32);
-    auto r32 = cannge_es::Cast(r3, (int64_t) f32);
-    auto one = ctx.builder.CreateConst(std::vector<float>(S, 1.0f), std::vector<int64_t>{ 1, 1, S });
-    h        = cannge_es::Cast(cannge_es::Add(cannge_es::Mul(h32, cannge_es::Sub(one, m3)), cannge_es::Mul(r32, m3)),
-                               (int64_t) dt);
+    // prefill (M > 1 rows): sequential per-row one-hot selects, reusing the
+    // M==1-proven helper. Costs ~4 passes over the view per row - acceptable
+    // for prefill (decode keeps the single-select path above).
+    auto hacc = h32;
+    for (int64_t i = 0; i < M; i++) {
+        auto idx1 = cannge_es::Slice(idxh, std::vector<int64_t>{ i }, std::vector<int64_t>{ 1 });
+        ggml_tensor * idx1t = sr->idx; // dtype from the original idx tensor
+        cannge_es::EsTensorHolder m;
+        if (!ggml_cannge_onehot_slot(ctx, idx1, S, m, idx1t)) {
+            return false;
+        }
+        auto m3  = cannge_es::Reshape(m, std::vector<int64_t>{ 1, 1, S });
+        auto ri  = cannge_es::Slice(rowh, std::vector<int64_t>{ i, 0 }, std::vector<int64_t>{ 1, t->ne[1] * t->ne[2] });
+        auto r3  = cannge_es::Reshape(ri, std::vector<int64_t>{ t->ne[2], t->ne[1], 1 });
+        auto r32 = cannge_es::Cast(r3, (int64_t) f32);
+        auto one = ctx.builder.CreateConst(std::vector<float>(S, 1.0f), std::vector<int64_t>{ 1, 1, S });
+        hacc     = cannge_es::Add(cannge_es::Mul(hacc, cannge_es::Sub(one, m3)), cannge_es::Mul(r32, m3));
+    }
+    h = cannge_es::Cast(hacc, (int64_t) dt);
     return true;
 }

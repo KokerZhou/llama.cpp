@@ -414,8 +414,14 @@ static bool ggml_cannge_build_node(ggml_cannge_build_context & ctx, ggml_tensor 
                         if (getenv("GGML_CANNGE_DEBUG_BUILD")) {
                             fprintf(stderr, "[DBG-SPLICE] kq-side base=%s\n", kinfo.base->name);
                         }
+                        // single-row scatter only: this gemv is M==1, and the
+                        // prefill multi-row scatter is served by the V-side
+                        // matrix splice (the M>1 attention goes BatchMatMulV3)
                         const ggml_cannge_set_rows_op * sr = ggml_cannge_sr_for_base(ctx, kinfo.base);
-                        cannge_es::EsTensorHolder       rowh, idxh;
+                        if (sr != nullptr && ggml_nelements(sr->idx) != 1) {
+                            sr = nullptr;
+                        }
+                        cannge_es::EsTensorHolder rowh, idxh;
                         if (getenv("GGML_CANNGE_DEBUG_BUILD")) {
                             fprintf(stderr, "[DBG-SPLICE] kq-side sr=%s dataget=%d idxget=%d\n",
                                     sr ? "found" : "none", sr && ctx.tensors.count(sr->data) > 0,
