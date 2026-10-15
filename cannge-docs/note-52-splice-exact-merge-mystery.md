@@ -32,7 +32,14 @@
 
 **机制假说（合并图乱码的最大嫌疑）**：合并 fragment 的强制输出端口 = 每层 Kcur/Vcur 的 SET_ROWS data 端口（2×N 个）+ 边界隐状态。若 GE 对部分端口做同类别名 → Kcur/Vcur 快照读到错误 GE buffer → host scatter 把错值写进 KV cache → 第一步 decode 即乱码。N≤8 时端口数少可能未触发别名启发式，非单调性由此而来。
 
-**下一步验证**（探针先行）：kvattn 探针加祖先链双输出用例（out2=f(out1)，两者都 set_output）→ 若读回相同值 = GE 输出端口别名实锤。若实锤，workaround 方向：SET_ROWS data 不走高强制端口（改为在 build 里把 scatter 快照源换成 device 侧，或每层独立小图执行散射）。
+**下一步验证**（探针先行）：~~kvattn 探针加祖先链双输出用例~~ 已做（批M，ggml_probe_alias）：
+
+**批M 结论（端口别名假说排除）**：
+- 祖先链 y1→y2→y3 三输出（set_output 与 DUMP 强制两种）：全部精确读回，小图如此；
+- **1200 节点长链** + 3 个祖先 flagged 输出：依然全部精确——GE 输出端口即使大图也无别名。
+- l_out-24/28/32 同校验和的解释 = **DUMP 读死张量的 artifacts**：ggml-alloc 会复用死张量 buffer，post-execute 回写互相覆盖——观测工具本身制造了假象，GE 无辜。
+
+**批M 新线索（真 bug 方向）**：ngl=12 合并 decode 的 DBG-IO "out" 打印清单里 **Kcur/Vcur（1024,1）有 22 条，但跨片隐状态（2560,1）一条都没有**——合并 fragment 喂给 CPU lm head 的隐状态回写似乎没发生（下游读到陈旧 buffer → 乱码）。而 ngl=8 同结构却连贯。**下一步：对比 ngl=8（好）与 ngl=12（坏）的隐状态输出注册差异**（boundary-output 收集在两种切分下为何不同），这大概率就是根因。
 
 ## 4. 数字
 
