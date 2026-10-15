@@ -47,7 +47,11 @@
 
 证伪的四个 GE 假说（ggml_probe_alias 全部 PASS）：祖先链端口别名（小图+1200 节点长链）、32 个兄弟端口、双重用途（图内消费+终端输出）、强制私有物化（Add-zeros，可能被 GE 折叠）。DUMP 强制读死张量的同校验和 = ggml-alloc buffer 复用 artifact，非 GE 行为。
 
-**下一步（唯一 remaining 的大刀）**：在真实合并图上做层内二分——build 里加 debug 开关把 il>=K 的层换成 passthrough，定位第一个使 Kcur 写回偏离的层/算子；或对比 merged/split 的 Kcur 写回 staging 绑定索引。
+**批O 实锤（冒烟级）**：merged 模式全部 12 层 Kcur 写回**逐字节相同**（sum=f109b7a8，i0=2.115）——24 个 Kcur/Vcur 输出端口在 GE 运行时层被 collapse 到同一个 buffer；split 模式逐层不同（正确）。**但 GE 图本身完全正确**：dump 显示 24 个 NetOutput 端口、来源无一重复（12 Reshape + 12 Cast，逐层不同 producer）。→ 是 GE 运行时的输出刷新机制（davinci_model 的 refreshable_output_index_and_allocation_ids，E13025 错误信息里见过）把同形输出分到同一刷新组。
+
+**探针复现失败记录**：兄弟端口×32、祖先链（含 1200 节点）、双重用途×24、精确尺寸 {1,1024}×24、~2400 操作图 + 链垫——全部 PASS。模型独有触发因子未识别（候选：producer 深度/多消费者 fanout、refresh 组的确切构成条件）。
+
+**下一步（fix 方向）**：**绕开 Kcur/Vcur 端口 entirely**——cache-refresh 输出：SET_ROWS 改 in_graph（复用现成机制），build 里在 cache base holder {S,R} 上做 one-hot 选择产出"新鲜缓存"（M 行循环推广），节点本身作为输出端口（节点 ggml buffer = dst 视图 = cache），稠密回写后**host scatter 整体退役**（分裂配置收益也 +）。{512,1024} f16 的新端口形状若仍被 collapse 再按数量分片。
 
 ## 4. 数字
 
