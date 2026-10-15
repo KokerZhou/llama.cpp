@@ -121,6 +121,12 @@ struct ggml_cannge_plan {
     // dense copies of non-dense inputs (strided views), filled by a pre-execute
     // D2D copy on the compute stream; one slot per input, nullptr when direct
     std::vector<void *> input_staging;
+    // packed-arena staging for the per-step dense host inputs (merged graphs
+    // stage ~150 tiny inputs per execute; per-copy launch cost dominated
+    // bind): one pinned host arena, one async H2D per execute
+    void *  in_arena       = nullptr;
+    void *  in_arena_host  = nullptr;
+    size_t  in_arena_size  = 0;
     // parallel to input_staging: set once an immutable WEIGHTS input has been
     // staged, so later executes reuse the copy instead of re-uploading
     std::vector<char>   input_staged_once;

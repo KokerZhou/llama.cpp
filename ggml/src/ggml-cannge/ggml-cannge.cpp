@@ -403,6 +403,12 @@ ggml_cannge_plan::~ggml_cannge_plan() {
     for (void * p : input_staging) {
         aclrtFree(p);
     }
+    if (in_arena != nullptr) {
+        aclrtFree(in_arena);
+    }
+    if (in_arena_host != nullptr) {
+        aclrtFreeHost(in_arena_host);
+    }
     if (fa_asl_dev != nullptr) {
         aclrtFree(fa_asl_dev);
     }
@@ -453,6 +459,10 @@ static enum ggml_status ggml_backend_cannge_graph_compute(ggml_backend_t backend
 
     const double dbg_t1 = g_dbg_time.on ? g_dbg_time.now() : 0;
     const std::string signature = ggml_cannge_plan_signature(cgraph);
+    if (getenv("GGML_CANNGE_DEBUG_SIG")) {
+        fprintf(stderr, "[DBG-SIG] nodes=%d first=%s sig=%llu\n", cgraph->n_nodes, cgraph->nodes[0]->name,
+                (unsigned long long) std::hash<std::string>{}(signature));
+    }
     const double dbg_t1a = g_dbg_time.on ? g_dbg_time.now() : 0;
 
     ggml_cannge_plan * plan = nullptr;
@@ -555,6 +565,54 @@ static enum ggml_status ggml_backend_cannge_graph_compute(ggml_backend_t backend
         }
         bool staged_any      = false;
         bool staged_host_any = false; // dense host src: deferred pageable H2D needs the drain
+
+        // pack the per-step dense host staged inputs into one pinned arena +
+        // one async H2D (merged graphs stage ~150 tiny inputs per execute;
+        // the per-copy launch cost dominated bind - batch them). weights
+        // (stage-once) and view-aliased inputs keep their own paths
+        std::vector<char>   in_arena_on(io.inputs.size(), 0);
+        std::vector<size_t> in_arena_off(io.inputs.size(), 0);
+        size_t              arena_need = 0;
+        for (size_t i = 0; i < io.inputs.size(); i++) {
+            ggml_tensor * t = io.inputs[i];
+            if (!io.input_staged[i] || io.input_base[i] || plan->input_staged_once[i]) {
+                continue;
+            }
+            const bool host = t->buffer != nullptr && ggml_backend_buffer_is_host(t->buffer);
+            const bool wonce = !getenv("GGML_CANNGE_NO_WONCE") && t->op == GGML_OP_NONE &&
+                               !(t->flags & GGML_TENSOR_FLAG_INPUT) && host && ggml_nbytes(t) > 64 * 1024;
+            if (host && ggml_is_contiguous(t) && !wonce) {
+                in_arena_on[i]  = 1;
+                in_arena_off[i] = arena_need;
+                arena_need += (ggml_nbytes(t) + 255) & ~(size_t) 255;
+            }
+        }
+        if (arena_need > 0) {
+            if (plan->in_arena_size < arena_need) {
+                if (plan->in_arena != nullptr) {
+                    ACL_CHECK(aclrtFree(plan->in_arena));
+                }
+                if (plan->in_arena_host != nullptr) {
+                    ACL_CHECK(aclrtFreeHost(plan->in_arena_host));
+                }
+                if (aclrtMalloc(&plan->in_arena, arena_need, ACL_MEM_MALLOC_HUGE_FIRST) != ACL_SUCCESS ||
+                    aclrtMallocHost(&plan->in_arena_host, arena_need) != ACL_SUCCESS) {
+                    GGML_LOG_ERROR("%s: failed to allocate input arena (%zu bytes)\n", __func__, arena_need);
+                    return GGML_STATUS_FAILED;
+                }
+                plan->in_arena_size = arena_need;
+            }
+            for (size_t i = 0; i < io.inputs.size(); i++) {
+                if (in_arena_on[i]) {
+                    memcpy((char *) plan->in_arena_host + in_arena_off[i], io.inputs[i]->data,
+                           ggml_nbytes(io.inputs[i]));
+                }
+            }
+            ACL_CHECK(aclrtMemcpyAsync(plan->in_arena, arena_need, plan->in_arena_host, arena_need,
+                                       ACL_MEMCPY_HOST_TO_DEVICE, ctx->stream));
+            staged_any      = true;
+            staged_host_any = true;
+        }
         for (size_t i = 0; i < io.inputs.size(); i++) {
             ggml_tensor * t = io.inputs[i];
             // a view that aliases a previously registered input is bound with
@@ -563,7 +621,10 @@ static enum ggml_status ggml_backend_cannge_graph_compute(ggml_backend_t backend
             // build's Slice/alias nodes operate on
             void * dev_ptr = io.input_base[i] ? (void *) ((char *) io.input_base[i]->data + io.input_base_offset[i])
                                               : t->data;
-            if (io.input_staged[i]) {
+            if (in_arena_on[i]) {
+                dev_ptr = (char *) plan->in_arena + in_arena_off[i];
+            }
+            if (io.input_staged[i] && !in_arena_on[i]) {
                 if (plan->input_staging[i] == nullptr &&
                     aclrtMalloc(&plan->input_staging[i], ggml_nbytes(t), ACL_MEM_MALLOC_HUGE_FIRST) != ACL_SUCCESS) {
                     GGML_LOG_ERROR("%s: failed to allocate staging buffer for input %s (%zu bytes)\n", __func__, t->name,
