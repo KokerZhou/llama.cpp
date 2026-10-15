@@ -309,6 +309,31 @@ bool ggml_cannge_plan_analyze(ggml_cgraph * cgraph, ggml_cannge_plan_io & io, st
                 // build reconstruct the relabel chain in-GE. Binds the dense
                 // buffer directly and skips the strided staging bounce with
                 // its host round-trip and stream drain (note-48).
+                // CONT of a rearrange view (the V cache transpose): the dense
+                // cont bytes already live in the base buffer - bind the base
+                // (batch R: kills the 1MB/layer H2D staging in the split
+                // config too; the in-GE relabel reads the post-scatter cache)
+                if (src->op == GGML_OP_CONT && src->src[0] != nullptr && src->src[0]->view_src != nullptr) {
+                    ggml_tensor *            v = src->src[0];
+                    ggml_cannge_view_info    vinfo;
+                    if (ggml_cannge_resolve_view(v, vinfo) && !vinfo.is_dense && vinfo.offset == 0 &&
+                        ggml_cannge_is_rearrange_view(v) && ggml_is_contiguous(vinfo.base)) {
+                        const int64_t b_nd = ggml_n_dims(vinfo.base);
+                        const int64_t t_el = ggml_nelements(src);
+                        const int64_t b_el = ggml_nelements(vinfo.base);
+                        int64_t       inner = 1;
+                        for (int64_t k = 0; k + 1 < b_nd; k++) {
+                            inner *= vinfo.base->ne[k];
+                        }
+                        if (t_el <= b_el && (b_nd < 2 || (inner > 0 && t_el % inner == 0))) {
+                            seen_input[src] = true;
+                            src = vinfo.base;
+                            if (seen_input.count(src)) {
+                                continue;
+                            }
+                        }
+                    }
+                }
                 if (src->view_src != nullptr) {
                     ggml_cannge_view_info vinfo;
                     if (ggml_cannge_resolve_view(src, vinfo) && !vinfo.is_dense && vinfo.offset == 0 &&
