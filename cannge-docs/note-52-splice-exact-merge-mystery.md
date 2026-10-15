@@ -67,6 +67,14 @@ SET_ROWS in_graph 路径已整体改用 TSU（替换 one-hot 选择 + BatchMatMu
 
 注：DUMP 强制对部分张量（Kcur/Qcur/l_out-24）静默无输出（原因未查），观测工具仍有盲区。
 
+## 3.6d 批V 根因锁定：同形输出端点的运行时 collapse（真实现象）
+
+prefill TSU 输入对比：Vcur-25/26 视图 merged==split，**Vcur-27+ 全差** → prefill 第 27 层起 l_out 已偏（decode 同款早期偏离）。prefill 结构：FA(M=9) 在 CPU，CANNGE 段为 [层 prologue(qkv+rope+TSU)] + [wo+ffn]。
+
+结合批O 的实锤观察（24 个同形 {1,1024} f32 端口逐字节同值——观察真实，只有机制命名错了）：**GE 运行时把同 shape+dtype 的并列输出端口绑到同一 buffer**。Vcur/Kcur (view) {1024,9} f32 × 12 若跨片即撞此行为 → 27+ 层读到错值。这不是"GE 有 bug"的表述——是我们的图结构触发了该行为的组合条件；解法在我们侧：**消灭同形输出端口并列**（消跨片 / 不同形化 / 每端口独立 staging 验证）。
+
+下一步候选：(1) 查 Vcur 跨片去向（M=2 图角色待查）；(2) 验证法——把跨片张量写回 staging 改为逐端口独立 device buffer 看偏离是否消失；(3) 或 prologue 与 wo+ffn 合并成一片（消跨片）。
+
 ## 3.7 批P cache-refresh（WIP，2d624231f）
 
 实现：merge 模式下 SET_ROWS 标记 in_graph，build 在 cache base {S,R} 上做 one-hot 行选择（M=1）/ m^T@rows BatchMatMulV3（M>1，K pad 8），节点自身作输出端口（buffer=cache），host scatter 退役；消费侧 splice 自动禁用（sr_for_base 跳过 in_graph）。**collapse 确证为按形状分组**：{512,1024} f16 refresh 端口逐层写回各异（不再塌）。
