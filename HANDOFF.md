@@ -1,85 +1,65 @@
-# CANNGE 服务器侧交接包（HANDOFF）
+# CANNGE 服务器侧交接包 v2（HANDOFF）
 
-整理：2026-10-08，工作站侧 Kimi Code → 服务器侧 Kimi Code。
+整理：2026-10-14（v2），工作站侧 Kimi Code → 910 服务器侧 Kimi Code。
+v1（2026-10-08, 310）由你的前任（310 服务器侧 Kimi）执行完毕，产出已合入：
+代码 `cannge` 分支前进到 `d3a3ef81f`（2 新 commit），笔记 note-15 更新 + note-21~29 八篇
+（本包 `cannge-docs/` 已是合并后的完整树）。
 
-## 一句话项目状态
+## 你的身份与工作模式
 
-在 `ggml-org/llama.cpp` 的 fork（`KokerZhou/llama.cpp`）上实现 CANNGE 后端：
-Ascend GE 整图编译后端（ES 构图 → GE 编译 → session 执行 → plan cache），
-与 GGML_CANN（eager ACLNN）完全独立、可共存。分支 **`cannge`**，两个 commit：
+你在 910 开发机（1×910B3，CANNLab 环境 `DevEnvC_Abwb9`）上**自主推进** CANNGE 项目。
+工作站上另有一个 Kimi Code（协调者），负责文档/git/收敛；你负责 910 上的构建、
+测试、调查与修复。纪律相同：**commit/push 必须用户明示**（batch 模式：改码→构建→
+TBO/冒烟验证→落盘 note，一批一验，控制变量）。
 
-- `d85b6bd08` ggml : add CANNGE backend（12 文件 +2105）
-- `28558340a` ggml : fix CANNGE correctness findings（F1/F2/F3 + in-place；message 注明可 squash）
+## 第一动作（按序）
 
-## 第一动作（按序，不要跳）
-
-1. 通读本包 `cannge-docs/README.md`（索引）→ `note-10-findings.md`（F1-F8 台账）→
-   `note-20-matmul-constraint-docs.md` §5（F7 实验设计）。
-2. 用 PAT 对齐仓库：`GH_TOKEN=<PAT> bash scripts/01_clone_repo.sh`（token 只进
-   `~/.git-credentials`，600 权限；**禁止**把 token 写进任何文件、笔记或 git remote URL）。
-3. 构建冒烟：`bash scripts/02_build_and_test.sh <SOC_TYPE>`。
-   SOC_TYPE：310 用 `Ascend310P3`，910 用 `Ascend910B3`。
-4. 之后等用户指派任务。当前热点：F7（判别实验，设计已好在 note-20 §5.2）、
-   F8（修法已定在 note-10 F8，等批准）。
+1. 通读 `cannge-docs/README.md` → `note-27-failure-chain.md`（17 环根因链 + 当前状态）
+   → `note-24-fix-log.md`（F9-F13+）→ `note-25-model-integration.md`（模型集成，含 #8
+   病态编译复发）。
+2. 仓库对齐：`GH_TOKEN=<PAT> bash scripts/01_clone_repo.sh`（预期 HEAD=`d3a3ef81f`）。
+   注意：旧目录 `/home/developer/cannge-ggml.rsync-era-backup` 是 rsync 时代裸副本
+   （内含未入库的 9.0 shim，note-9 §5，F5 hold），不要直接用它构建。
+3. 构建冒烟：`bash scripts/02_build_and_test.sh Ascend910B3`。
+   **910 特有口径**：f32 matmul 门走 `#else` 分支（8 元素对齐，非 310P 的 16）；
+   病态编译（note-25 #8）在 910B 的形状口径可能不同于 310P，结论须标注 SoC。
+4. 向用户汇报环境与基线，然后按"当前工作队列"领任务。
 
 ## 构建/测试命令速查
 
 ```bash
-# toolkit 环境（两个候选路径，哪个存在 source 哪个）
-source /usr/local/Ascend/cann-9.1.0/set_env.sh 2>/dev/null || source ~/Ascend/ascend-toolkit/set_env.sh
-
-# 构建
-cmake -B build -DGGML_CANNGE=ON -DGGML_CANN=OFF -DSOC_TYPE=<SOC> -DCMAKE_BUILD_TYPE=Release
+source /home/developer/Ascend/ascend-toolkit/set_env.sh
+cmake -B build -DGGML_CANNGE=ON -DGGML_CANN=OFF -DSOC_TYPE=Ascend910B3 -DCMAKE_BUILD_TYPE=Release \
+     -DLLAMA_BUILD_UI=OFF -DLLAMA_USE_PREBUILT_UI=OFF   # UI 下载 github 不通会拖死构建（note-27）
 cmake --build build --target ggml-cannge test-backend-ops -j$(nproc)
-
-# 整图路径必须开 env 门（默认 off，零存在感）
 GGML_CANNGE_GRAPH=1 ./build/bin/test-backend-ops test -b CANNGE0 -o ADD,MUL,MUL_MAT,SCALE,RMS_NORM,SOFT_MAX,SILU,GET_ROWS,CONCAT
 ```
 
-基线口径（310P3 x 9.1，28558340a）：探针 11/11；TBO 160 OK / 45 FAIL / 2366 NS（总 2571）。
-对比/判读规则见 `note-16-validation-spec.md`。
+冒烟（模型级）注意事项（全部来自 note-27/note-25 的教训）：
+- llama-cli 冒烟 stdout 必须截断防 `"> "` EOF 洪泛写爆磁盘；
+- 对拍参考文件先验证"同配置自比=100%"再采信；KL 解析用 C++ 工具，不信 python 快写解析器；
+- GE 编译卡死判别：看 `ge_davidmdlrun` 线程是否全闲（全闲=编译未下发，病态在 host 侧）。
 
-## 纪律（不可违反，违反即返工）
+## 当前工作队列（按优先级，等用户确认后开工）
 
-1. **未获用户明示，禁止 git commit / push**；commit message 简洁 +
-   `Assisted-by: Kimi Code`；合并前 squash。
-2. **禁止 abort/exit**：不支持即返回 false 交上层调度。
-3. 注释规范（`note-13-code-style.md` + `note-11-doc-sources.md`）：每个 op mapping /
-   GE 语义决策带一行官方出处（T1-T3 来源）；T5（JittorInfer）/T6（.so/issue 线索）
-   只作线索、不进注释；注释 ASCII、1-2 行。
-4. 后端基线 **CANN 9.1**（9.0 兼容 hold，见 note-17）；**950 不做**（仅限 CANNGE）；
-   手写算子 hold（note-15 L5）。
-5. llama.cpp/AGENTS.md 的项目规矩全部有效（先读）。
-6. 凭证不落盘、不进 repo、不进笔记；共享环境（910）不动他人目录与全局配置。
+1. **冒烟续跑（note-27 #13/#14）**：d3a3ef81f 已含 set_rows host/dst 修复，重跑 Qwen3-4B
+   冒烟过 execute 阶段；乱码则按算子二分（embedding GET_ROWS / f16 matmul Cast / RMS_NORM）。
+2. **病态编译二分定位（note-25 #8）**：先加编译起点日志（图签名/节点数），命中后按
+   ubatch/子图二分定位触发形状。**这是 310P 家族问题在 910B 上的对照观察点**。
+3. **RMS-in-graph 根因调查（note-27 #15，主破坏者）**：孤立 RMS 精确、进图即坏、
+   DISABLE_ALL 也在场即破坏。`GGML_CANNGE_NO_RMS` 旋钮现成。怀疑方向：图集成
+   （绑定/别名/ staging 交互），不是 RMS kernel 本身。
+4. TBO 910 基线对拍（310 口径 324/333，note-27）→ 填 note-9 矩阵 910×9.1 格（新代码）。
+5. 以上收敛后跑 note-29 覆盖矩阵（36 次生成）。
 
-## 文件地图（cannge-docs/）
+## 纪律（与 v1 相同，摘录）
 
-| note | 内容 |
-|---|---|
-| note-1~8 | 前手调研：ES 管线、推理机制、设计决策、版本对照、官方 API 精读、远程测试纪律 |
-| note-9 | 多 SoC x 多 CANN 版本验证矩阵（310/910 × 9.0/9.1 四轮实测） |
-| note-10 | **findings 台账 F1-F8（当前活跃：F7 判据实验、F8 in-place 漏网）** |
-| note-11 | 文档来源注册表（T1-T6 分级、注释引用规范） |
-| note-12 | 环境运维手册（注意顶部 2026-10-08 更新：归档根已统一、910 keyring 坏） |
-| note-13 | 代码风格与工程纪律 |
-| note-14 | 算子接入规范（两层判定、CPY/VIEW 注册规则、已支持 op 清单） |
-| note-15 | 回退层次规范（L0-L6，L3/L4b/L5 均 hold） |
-| note-16 | 验证规范（基线口径、探针构成、归档格式） |
-| note-17 | 兼容性与版本策略（9.1 基线、310 先行、JittorInfer 边界） |
-| note-18 | 架构总览（四层管线、plan 缓存、GE 生命周期） |
-| note-19 | 逐 SoC ops-info 精细静态表（16 SoC 取证） |
-| note-20 | **matmul 形状约束文档裁决 + F7 最小判别实验设计（§5.2）** |
+- 未获用户明示禁止 commit/push；message 简洁 + `Assisted-by: Kimi Code`；
+- 禁止 abort；注释按 note-11/note-13 带官方出处、ASCII、1-2 行；T5/T6 不进注释；
+- 凭证不落盘文件、不进 repo、不进笔记（`~/.git-credentials` 600 除外）；
+- 记录格式沿用 note 体系（note-30 起编号，别覆盖 1~29）；每轮结束把成果推
+  `cannge-handoff-notes` 式笔记分支或交给协调者合入。
 
-## 已知悬挂（接手前读完再动）
+## 文件地图
 
-- **F7**：f32 m=16 n=8 家族数值错 + GE 病态编译。文档已裁决"官方无此文"（note-20），
-  待做 §5.2 判别实验（关键形状 f32 m/n ∈ {8,24,40}），假设：f32→fp16 回退后按
-  fp16 口径二次判对齐。
-- **F8**：view_src 型 in-place（rms_norm_inplace/scale_inplace）绕过 L0 门。修法已定
-  （note-10 F8：supports_op 白名单 {VIEW,PERMUTE,TRANSPOSE} + analyze 别名捷径同步限制），
-  等用户批准后实现+验证。
-- **归档事故**：F4/910 原始归档（report-f4.md 等）已丢失，只有 note-9/10/16 的摘要
-  数字；如需原始日志需重跑。
-- **910 独有**：`/home/developer/cannge-ggml` 有未入库的 9.0 shim（F5 hold，
-  note-9 §5）；npussh keyring 当前 EACCES。
-- `probes/` 下是幸存的 310 首轮探针源码（F4 探针已丢失，可据此重建）。
+见 `cannge-docs/README.md`（note-21~29 为 310 轮产出，note-1~20 为更早轮次）。
