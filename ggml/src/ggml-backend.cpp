@@ -999,6 +999,16 @@ static void ggml_backend_sched_print_assignments(ggml_backend_sched_t sched, str
     for (int i = 0; i < graph->n_nodes; i++) {
         if (cur_split < sched->n_splits && i == sched->splits[cur_split].i_start) {
             ggml_backend_t split_backend = sched->backends[sched->splits[cur_split].backend_id];
+            if (sched->debug) {
+                struct ggml_tensor * fn = NULL;
+                for (int k = sched->splits[cur_split].i_start; k < sched->splits[cur_split].i_end; k++) {
+                    if (!ggml_is_view_op(graph->nodes[k]->op)) { fn = graph->nodes[k]; break; }
+                }
+                fprintf(stderr, "[SPLIT] #%d backend=%s n_inputs=%d nodes=%d first=%s(%s)\n", cur_split,
+                        ggml_backend_name(split_backend), sched->splits[cur_split].n_inputs,
+                        sched->splits[cur_split].i_end - sched->splits[cur_split].i_start, fn ? fn->name : "?",
+                        fn ? ggml_op_name(fn->op) : "?");
+            }
             GGML_LOG_DEBUG("\n## SPLIT #%d: %s # %d inputs", cur_split, ggml_backend_name(split_backend),
                 sched->splits[cur_split].n_inputs);
             for (int j = 0; j < sched->splits[cur_split].n_inputs; j++) {
@@ -1415,6 +1425,11 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
                             ggml_backend_sched_split_inputs_grow(split);
                         }
                         split->inputs[n_inputs] = src;
+                        // the tensor is consumed by a later split: its producer
+                        // split must materialize it even when it also has
+                        // consumers inside that split (whole-graph backends
+                        // only write port tensors back to the ggml buffer)
+                        ggml_set_output(src);
                     }
                     node->src[j] = tensor_id_copy(src_id, cur_backend_id, sched->cur_copy);
                 }
@@ -1422,6 +1437,41 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
         }
         split->i_end = graph->n_nodes;
         sched->n_splits = i_split + 1;
+
+        // tensors produced in one split but consumed in another must be
+        // materialized by the producing split: whole-graph backends only
+        // write output-port tensors back to the ggml buffer. The copy path
+        // above flags its sources; same-backend splits (weight boundaries)
+        // cross implicitly and need the same flag. Producer split of a node
+        // = the split whose [i_start, i_end) contains its position.
+        auto split_of = [&](int idx) {
+            for (int s = 0; s < sched->n_splits; s++) {
+                if (idx >= sched->splits[s].i_start && idx < sched->splits[s].i_end) return s;
+            }
+            return -1;
+        };
+        std::unordered_map<ggml_tensor *, int> producer_split;
+        for (int s = 0; s < sched->n_splits; s++) {
+            for (int k = sched->splits[s].i_start; k < sched->splits[s].i_end; k++) {
+                if (!ggml_is_view_op(graph->nodes[k]->op)) {
+                    producer_split.emplace(graph->nodes[k], s);
+                }
+            }
+        }
+        for (int s = 0; s < sched->n_splits; s++) {
+            for (int k = sched->splits[s].i_start; k < sched->splits[s].i_end; k++) {
+                struct ggml_tensor * nd = graph->nodes[k];
+                if (ggml_is_view_op(nd->op)) continue;
+                for (int j = 0; j < GGML_MAX_SRC; j++) {
+                    struct ggml_tensor * src = nd->src[j];
+                    if (src == NULL || src->op == GGML_OP_NONE) continue;
+                    auto it = producer_split.find(src);
+                    if (it != producer_split.end() && it->second != s) {
+                        ggml_set_output(src);
+                    }
+                }
+            }
+        }
     }
 
     if (sched->debug) {
@@ -1671,6 +1721,12 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
             struct ggml_tensor * input = split->inputs[input_id];
             struct ggml_tensor * input_cpy = tensor_copy(input, split_backend_id, sched->cur_copy);
 
+            if (getenv("GGML_CANNGE_DEBUG_SR")) {
+                fprintf(stderr, "[DBG-SCHED] split %d backend %d input %s(%p) -> %s(%p)\n",
+                        split_id, split_backend_id, input->name, input->data,
+                        input_cpy->name, input_cpy->data);
+            }
+
             if (input->flags & GGML_TENSOR_FLAG_INPUT) {
                 // inputs from the user must be copied immediately to prevent the user overwriting the data before the copy is done
                 if (sched->events[split_backend_id][sched->cur_copy] != NULL) {
@@ -1895,7 +1951,10 @@ ggml_backend_sched_t ggml_backend_sched_new(
         sched->bufts[b] = bufts ? bufts[b] : ggml_backend_get_default_buffer_type(backends[b]);
         GGML_ASSERT(ggml_backend_supports_buft(backends[b], sched->bufts[b]));
 
-        if (sched->n_copies > 1) {
+        if (sched->n_copies > 1 || getenv("GGML_SCHED_EVENTS")) {
+            // n_copies==1: split boundaries otherwise take the full-device-sync
+            // fallback on every crossing; a backend with event support (e.g.
+            // CANNGE) then uses stream-level waits instead (note-46 批13b)
             for (int c = 0; c < sched->n_copies; c++) {
                 sched->events[b][c] = ggml_backend_event_new(backends[b]->device);
             }

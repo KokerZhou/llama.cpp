@@ -25,6 +25,7 @@
 // transfers, streams, GE sessions and graph plans.
 
 #include "ggml-cannge.h"
+#include "ggml-cannge-priv.h"
 #include "ggml-backend-impl.h"
 #include "ggml-impl.h"
 
@@ -34,31 +35,27 @@
 
 #include <acl/acl.h>
 
+#include <chrono>
+#include <fstream>
+#include <algorithm>
+#include <map>
+
+
+
+
 // gert::Tensor: zero-copy execution binding (exe_graph/runtime/tensor.h)
 #include <exe_graph/runtime/tensor.h>
 #include <graph/graph.h>
+#include <ge/ge_ir_build.h>
 #include <graph/types.h>
 
 #include <cstdlib>
 #include <cstring>
-#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
 
-#define GGML_CANNGE_NAME "CANNGE"
-
-// plan cache bound; HBM budget based eviction per D6 comes later
-#define GGML_CANNGE_MAX_PLANS 64
-
-#define ACL_CHECK(expr)                                                                                                          \
-    do {                                                                                                                         \
-        aclError err = (expr);                                                                                                   \
-        if (err != ACL_SUCCESS) {                                                                                                \
-            GGML_LOG_ERROR("%s: ACL error %d (%s) at %s:%d\n", __func__, err, aclGetRecentErrMsg(), __FILE__, __LINE__);         \
-        }                                                                                                                        \
-    } while (0)
 
 static void ggml_backend_cannge_set_device(int32_t device) {
     aclError err = aclrtSetDevice(device);
@@ -135,7 +132,7 @@ struct ggml_backend_cannge_buffer_context {
     void *  dev_ptr;
 };
 
-static const char * ggml_backend_cannge_buffer_type_name(ggml_backend_buffer_type_t buft) {
+const char * ggml_backend_cannge_buffer_type_name(ggml_backend_buffer_type_t buft) {
     ggml_backend_cannge_device_context * buft_ctx = (ggml_backend_cannge_device_context *) buft->context;
     return buft_ctx->name.c_str();
 }
@@ -265,7 +262,9 @@ static void ggml_backend_cannge_get_tensor_async(ggml_backend_t backend, const g
     ggml_backend_cannge_context * ctx = (ggml_backend_cannge_context *) backend->context;
     ggml_backend_cannge_set_device(ctx->device);
     ACL_CHECK(aclrtMemcpyAsync(data, size, (const char *) tensor->data + offset, size, ACL_MEMCPY_DEVICE_TO_HOST, ctx->stream));
+    const double dbg_s0 = g_dbg_time.on ? g_dbg_time.now() : 0;
     ACL_CHECK(aclrtSynchronizeStream(ctx->stream));
+    if (g_dbg_time.on) { g_dbg_time.cpy_sync += g_dbg_time.now() - dbg_s0; g_dbg_time.cpy_calls++; }
     if (getenv("GGML_CANNGE_DEBUG_IO")) {
         uint32_t a = 0, b = 0;
         const char * p = (const char *) data;
@@ -276,11 +275,20 @@ static void ggml_backend_cannge_get_tensor_async(ggml_backend_t backend, const g
     }
 }
 
+
 static bool ggml_backend_cannge_cpy_tensor_async(ggml_backend_t backend_src, ggml_backend_t backend_dst,
                                                  const ggml_tensor * src, ggml_tensor * dst) {
     GGML_UNUSED(backend_src);
     ggml_backend_cannge_context * ctx = (ggml_backend_cannge_context *) backend_dst->context;
     ggml_backend_cannge_set_device(ctx->device);
+    // layout-converting copy (strided src, dense split copy dst): gather via
+    // host bounce, one H2D; the scheduler's split copies are dense so GE can
+    // bind them directly without per-use staging
+    if (!ggml_are_same_layout(src, dst)) {
+        ggml_cannge_strided_copy(src, dst->data, false, ctx->stream);
+        ACL_CHECK(aclrtSynchronizeStream(ctx->stream));
+        return true;
+    }
     // cross-backend copies can involve host buffers (CPU fallback outputs),
     // ACL has no auto-direction memcpy: pick the kind from the buffer types
     aclrtMemcpyKind kind = ACL_MEMCPY_DEVICE_TO_DEVICE;
@@ -319,9 +327,28 @@ static bool ggml_backend_cannge_cpy_tensor_async(ggml_backend_t backend_src, ggm
             }
             return (uint32_t)((b << 16) | a);
         };
-        fprintf(stderr, "[DBG-IO] cpy %s -> %s kind=%d nbytes=%zu src=%08x dst=%08x %s\n", src->name, dst->name,
+        fprintf(stderr, "[DBG-IO] cpy %s -> %s kind=%d nbytes=%zu src=%08x dst=%08x %s", src->name, dst->name,
                 (int) kind, ggml_nbytes(src), flet(sbuf.data(), n), flet(dbuf.data(), n),
                 flet(sbuf.data(), n) == flet(dbuf.data(), n) ? "SAME" : "DIFF");
+        // chunk fletchers to catch duplicated/stale halves beyond the first 4K
+        {
+            const size_t total = ggml_nbytes(src);
+            for (size_t c = 4096; c + 4096 <= total && c <= 6 * 4096; c += 4096) {
+                std::vector<char> sb2(4096), db2(4096);
+                if (src_dev) {
+                    aclrtMemcpy(sb2.data(), 4096, (const char *) src->data + c, 4096, ACL_MEMCPY_DEVICE_TO_HOST);
+                } else {
+                    memcpy(sb2.data(), (const char *) src->data + c, 4096);
+                }
+                if (dst_dev) {
+                    aclrtMemcpy(db2.data(), 4096, (const char *) dst->data + c, 4096, ACL_MEMCPY_DEVICE_TO_HOST);
+                } else {
+                    memcpy(db2.data(), (const char *) dst->data + c, 4096);
+                }
+                fprintf(stderr, " +%zuk:%08x/%08x", c / 1024, flet(sb2.data(), 4096), flet(db2.data(), 4096));
+            }
+        }
+        fprintf(stderr, "\n");
     }
     return true;
 }
@@ -332,11 +359,10 @@ static void ggml_backend_cannge_synchronize(ggml_backend_t backend) {
     ACL_CHECK(aclrtSynchronizeStream(ctx->stream));
 }
 
-static bool ggml_backend_cannge_device_supports_op(ggml_backend_dev_t dev, const ggml_tensor * op);
 
 // L0 gate of the fallback ladder: the whole-graph path is opt-in via env,
 // read once; when off the backend reports no op support (default behavior)
-static bool ggml_backend_cannge_graph_env_enabled() {
+bool ggml_backend_cannge_graph_env_enabled() {
     static const bool enabled = [] {
         const char * env = std::getenv("GGML_CANNGE_GRAPH");
         return env != nullptr && env[0] == '1';
@@ -377,118 +403,12 @@ ggml_cannge_plan::~ggml_cannge_plan() {
     for (void * p : input_staging) {
         aclrtFree(p);
     }
+    if (fa_asl_dev != nullptr) {
+        aclrtFree(fa_asl_dev);
+    }
 }
 
-// copy between a strided ggml view layout and a compact dense buffer, via
-// ne1*ne2*ne3 element-granularity 2D copies (width = element size, height =
-// ne0, pitch = nb[0]); nb[0] can exceed the element size on permuted views
-static void ggml_cannge_strided_copy(const ggml_tensor * t, void * dense, bool dense_to_strided, aclrtStream stream) {
-    const size_t es   = ggml_element_size(t);
-    const size_t slab = (size_t) t->ne[0] * es; // one dense (i1,i2,i3) slab
-    const int64_t n   = t->ne[1] * t->ne[2] * t->ne[3];
-    // a staged input may live in host memory (CPU fallback output): ACL has no
-    // auto-direction memcpy
-    const bool    host = t->buffer != nullptr && ggml_backend_buffer_is_host(t->buffer);
-    // SDMA strided copies need >=4B rows and 4B-aligned pitches (f16
-    // transposed views have 2B strides): bounce the whole footprint through
-    // host memory for those, one aligned H2D/D2H per direction
-    bool aligned_ok = es >= 4;
-    for (int i = 0; i < GGML_MAX_DIMS && aligned_ok; i++) {
-        aligned_ok = t->nb[i] % 4 == 0;
-    }
-    if (!aligned_ok) {
-        int64_t off_last = 0;
-        for (int i = 0; i < GGML_MAX_DIMS; i++) {
-            off_last += (t->ne[i] - 1) * t->nb[i];
-        }
-        const size_t span = (size_t) off_last + es;
-        const size_t slab = (size_t) t->ne[0] * es;
-        std::vector<char> bounce(span);
-        if (dense_to_strided) {
-            std::vector<char> dense_host((size_t) n * slab);
-            ACL_CHECK(aclrtMemcpy(dense_host.data(), (size_t) n * slab, dense, (size_t) n * slab,
-                                  ACL_MEMCPY_DEVICE_TO_HOST));
-            for (int64_t l = 0; l < n; l++) {
-                const int64_t i1 = l % t->ne[1];
-                const int64_t i2 = (l / t->ne[1]) % t->ne[2];
-                const int64_t i3 = l / (t->ne[1] * t->ne[2]);
-                char * dst = bounce.data() + i1 * t->nb[1] + i2 * t->nb[2] + i3 * t->nb[3];
-                const char * src = dense_host.data() + (size_t) l * slab;
-                // a view whose dim0 is not the memory-fastest dim (nb0 > es,
-                // e.g. a transposed V cache view) needs element-wise scatter
-                if (t->nb[0] == (size_t) es) {
-                    memcpy(dst, src, slab);
-                } else {
-                    for (int64_t e = 0; e < t->ne[0]; e++) {
-                        memcpy(dst + (size_t) e * t->nb[0], src + (size_t) e * es, es);
-                    }
-                }
-            }
-            ACL_CHECK(aclrtMemcpy(t->data, span, bounce.data(), span, ACL_MEMCPY_HOST_TO_DEVICE));
-        } else {
-            if (host) {
-                for (int64_t l = 0; l < n; l++) {
-                    const int64_t i1 = l % t->ne[1];
-                    const int64_t i2 = (l / t->ne[1]) % t->ne[2];
-                    const int64_t i3 = l / (t->ne[1] * t->ne[2]);
-                    const char * src = (const char *) t->data + i1 * t->nb[1] + i2 * t->nb[2] + i3 * t->nb[3];
-                    char * dst = bounce.data() + (size_t) l * slab;
-                    if (t->nb[0] == (size_t) es) {
-                        memcpy(dst, src, slab);
-                    } else {
-                        for (int64_t e = 0; e < t->ne[0]; e++) {
-                            memcpy(dst + (size_t) e * es, src + (size_t) e * t->nb[0], es);
-                        }
-                    }
-                }
-            } else {
-                // device-resident strided source: D2H the strided span into a
-                // host mirror, gather it into dense layout in bounce; the
-                // shared H2D below lands it in staging
-                std::vector<char> mirror(span);
-                ACL_CHECK(aclrtMemcpy(mirror.data(), span, t->data, span, ACL_MEMCPY_DEVICE_TO_HOST));
-                for (int64_t l = 0; l < n; l++) {
-                    const int64_t i1 = l % t->ne[1];
-                    const int64_t i2 = (l / t->ne[1]) % t->ne[2];
-                    const int64_t i3 = l / (t->ne[1] * t->ne[2]);
-                    const char * src = mirror.data() + i1 * t->nb[1] + i2 * t->nb[2] + i3 * t->nb[3];
-                    char * dst = bounce.data() + (size_t) l * slab;
-                    if (t->nb[0] == (size_t) es) {
-                        memcpy(dst, src, slab);
-                    } else {
-                        for (int64_t e = 0; e < t->ne[0]; e++) {
-                            memcpy(dst + (size_t) e * es, src + (size_t) e * t->nb[0], es);
-                        }
-                    }
-                }
-            }
-            ACL_CHECK(aclrtMemcpy(dense, (size_t) n * slab, bounce.data(), (size_t) n * slab,
-                                  ACL_MEMCPY_HOST_TO_DEVICE));
-        }
-        return;
-    }
-    const aclrtMemcpyKind kind =
-        dense_to_strided ? (host ? ACL_MEMCPY_DEVICE_TO_HOST : ACL_MEMCPY_DEVICE_TO_DEVICE)
-                         : (host ? ACL_MEMCPY_HOST_TO_DEVICE : ACL_MEMCPY_DEVICE_TO_DEVICE);
-    if (getenv("GGML_CANNGE_DEBUG_COMPILE")) {
-        fprintf(stderr, "[DBG-COPY] %s t->data=%p host=%d dir=%s ne=%lld,%lld,%lld,%lld nb0=%lld\n",
-                dense_to_strided ? "out" : "in", t->data, (int) host, dense_to_strided ? "D2H" : (host ? "H2D" : "D2D"),
-                (long long) t->ne[0], (long long) t->ne[1], (long long) t->ne[2], (long long) t->ne[3],
-                (long long) t->nb[0]);
-    }
-    for (int64_t l = 0; l < n; l++) {
-        const int64_t i1 = l % t->ne[1];
-        const int64_t i2 = (l / t->ne[1]) % t->ne[2];
-        const int64_t i3 = l / (t->ne[1] * t->ne[2]);
-        char *       view_row = (char *) t->data + i1 * t->nb[1] + i2 * t->nb[2] + i3 * t->nb[3];
-        char *       dense_row = (char *) dense + (size_t) l * slab;
-        const void * src    = dense_to_strided ? (const void *) dense_row : (const void *) view_row;
-        void *       dst    = dense_to_strided ? (void *) view_row : (void *) dense_row;
-        const size_t spitch = dense_to_strided ? es : (size_t) t->nb[0];
-        const size_t dpitch = dense_to_strided ? (size_t) t->nb[0] : es;
-        ACL_CHECK(aclrtMemcpy2dAsync(dst, dpitch, src, spitch, es, (size_t) t->ne[0], kind, stream));
-    }
-}
+// 2D tiled repack: out[r*o_r + c*o_c] = in[r*i_r + c*i_c] for an [R x C]
 
 static enum ggml_status ggml_backend_cannge_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph) {
     ggml_backend_cannge_context * ctx = (ggml_backend_cannge_context *) backend->context;
@@ -499,6 +419,7 @@ static enum ggml_status ggml_backend_cannge_graph_compute(ggml_backend_t backend
     }
 
     ggml_backend_cannge_set_device(ctx->device);
+    const double dbg_t0 = g_dbg_time.on ? g_dbg_time.now() : 0;
 
     // static capability pre-check (L0 gate of the fallback ladder)
     ggml_backend_dev_t dev = ggml_backend_reg_dev_get(ggml_backend_cannge_reg(), ctx->device);
@@ -506,6 +427,12 @@ static enum ggml_status ggml_backend_cannge_graph_compute(ggml_backend_t backend
         ggml_tensor * node = cgraph->nodes[i];
         if (ggml_is_empty(node) || node->op == GGML_OP_NONE) {
             continue;
+        }
+        if (getenv("GGML_CANNGE_DEBUG_COMPILE") && node->op == GGML_OP_MUL_MAT && node->src[0] != nullptr &&
+            strstr(node->src[0]->name, "attn_output") != nullptr && node->src[1] != nullptr) {
+            fprintf(stderr, "[DBG-WO-PLAN] cgraph %s: src1=%s ne=%lld,%lld,%lld,%lld\n", node->name,
+                    node->src[1]->name, (long long) node->src[1]->ne[0], (long long) node->src[1]->ne[1],
+                    (long long) node->src[1]->ne[2], (long long) node->src[1]->ne[3]);
         }
         if (!ggml_backend_cannge_device_supports_op(dev, node)) {
             GGML_LOG_ERROR("%s: op %d not supported by CANNGE\n", __func__, (int) node->op);
@@ -524,7 +451,9 @@ static enum ggml_status ggml_backend_cannge_graph_compute(ggml_backend_t backend
         return GGML_STATUS_FAILED;
     }
 
+    const double dbg_t1 = g_dbg_time.on ? g_dbg_time.now() : 0;
     const std::string signature = ggml_cannge_plan_signature(cgraph);
+    const double dbg_t1a = g_dbg_time.on ? g_dbg_time.now() : 0;
 
     ggml_cannge_plan * plan = nullptr;
     auto               it   = ctx->plans.find(signature);
@@ -535,19 +464,32 @@ static enum ggml_status ggml_backend_cannge_graph_compute(ggml_backend_t backend
     // compile -> load once per signature, bind + execute on every call
     if (plan == nullptr) {
         if (getenv("GGML_CANNGE_DEBUG_COMPILE")) {
-            fprintf(stderr, "[DBG-COMPILE] start nodes=%d first=%s(%s) last=%s(%s)\n", cgraph->n_nodes,
+            fprintf(stderr, "[DBG-COMPILE] start nodes=%d first=%s(%s) last=%s(%s) sig=%zu\n", cgraph->n_nodes,
                     cgraph->nodes[0]->name, ggml_op_name(cgraph->nodes[0]->op), cgraph->nodes[cgraph->n_nodes - 1]->name,
-                    ggml_op_name(cgraph->nodes[cgraph->n_nodes - 1]->op));
+                    ggml_op_name(cgraph->nodes[cgraph->n_nodes - 1]->op), std::hash<std::string>{}(signature));
         }
         // build and compile first so a build failure is not cached; a
         // compile/load failure caches a FAILED plan below
         std::unique_ptr<ggml_cannge_plan> fresh(new ggml_cannge_plan);
         fresh->signature = signature;
 
+        // IFA actual_seq_lengths buffer must exist before the build binds it
+        if (io.fa_mask != nullptr && fresh->fa_asl_dev == nullptr &&
+            aclrtMalloc(&fresh->fa_asl_dev, 8, ACL_MEM_MALLOC_HUGE_FIRST) != ACL_SUCCESS) {
+            GGML_LOG_ERROR("%s: failed to allocate fa_asl buffer\n", __func__);
+            fresh->fa_asl_dev = nullptr;
+        }
+        io.fa_asl_dev = fresh->fa_asl_dev;
+
         void * graph = nullptr;
         if (!ggml_cannge_graph_build(*fresh, io, cgraph, graph, err)) {
             GGML_LOG_ERROR("%s: graph build failed: %s\n", __func__, err.c_str());
             return GGML_STATUS_FAILED;
+        }
+        if (getenv("GGML_CANNGE_DUMP_GE")) {
+            std::ofstream gs("/tmp/cannge_graph.txt", std::ios::app);
+            gs << "===== graph_id " << fresh->graph_id << " sig " << std::hash<std::string>{}(signature) << " =====\n";
+            (*(ge::Graph *) graph).Dump(ge::Graph::DumpFormat::kTxt, gs);
         }
         if (getenv("GGML_CANNGE_DEBUG_COMPILE")) {
             fprintf(stderr, "[DBG-COMPILE] ES build done nodes=%d, GE compile...\n", cgraph->n_nodes);
@@ -579,11 +521,13 @@ static enum ggml_status ggml_backend_cannge_graph_compute(ggml_backend_t backend
 
         if (ctx->plans.size() >= GGML_CANNGE_MAX_PLANS) {
             ctx->evict_oldest_plan();
+            if (g_dbg_time.on) g_dbg_time.evicts++;
         }
         plan->seq = ctx->next_plan_seq++;
         ctx->plans[signature] = plan;
     }
 
+    const double dbg_t2 = g_dbg_time.on ? g_dbg_time.now() : 0;
     if (plan->state == ggml_cannge_plan::FAILED) {
         return GGML_STATUS_FAILED;
     }
@@ -606,7 +550,11 @@ static enum ggml_status ggml_backend_cannge_graph_compute(ggml_backend_t backend
         if (plan->input_staging.size() < io.inputs.size()) {
             plan->input_staging.resize(io.inputs.size(), nullptr);
         }
-        bool staged_any = false;
+        if (plan->input_staged_once.size() < io.inputs.size()) {
+            plan->input_staged_once.resize(io.inputs.size(), 0);
+        }
+        bool staged_any      = false;
+        bool staged_host_any = false; // dense host src: deferred pageable H2D needs the drain
         for (size_t i = 0; i < io.inputs.size(); i++) {
             ggml_tensor * t = io.inputs[i];
             // a view that aliases a previously registered input is bound with
@@ -622,23 +570,104 @@ static enum ggml_status ggml_backend_cannge_graph_compute(ggml_backend_t backend
                                    ggml_nbytes(t));
                     return GGML_STATUS_FAILED;
                 }
-                ggml_cannge_strided_copy(t, plan->input_staging[i], false, ctx->stream);
-                dev_ptr = plan->input_staging[i];
-                staged_any = true;
-            }
-            gert::Tensor tensor;
+                // big host-resident leaves that are not graph inputs are
+                // weights: immutable, so stage once per plan instead of
+                // re-uploading every execute. small tensors and the per-token
+                // inputs (flagged INPUT) are re-staged every execute
+                const bool is_weight = !getenv("GGML_CANNGE_NO_WONCE") && t->op == GGML_OP_NONE &&
+                                       !(t->flags & GGML_TENSOR_FLAG_INPUT) &&
+                                       ggml_nbytes(t) > 64 * 1024;
+                if (getenv("GGML_CANNGE_DEBUG_COMPILE") && ggml_nbytes(t) > 1024 * 1024 &&
+                    (t->op != GGML_OP_NONE || (t->flags & GGML_TENSOR_FLAG_INPUT))) {
+                    fprintf(stderr, "[DBG-WONCE] %s op=%d flags=%x not-a-weight-leaf\n", t->name, (int) t->op,
+                            (unsigned) t->flags);
+                }
+                if (!is_weight || !plan->input_staged_once[i]) {
+                    ggml_cannge_strided_copy(t, plan->input_staging[i], false, ctx->stream);
+                    dev_ptr            = plan->input_staging[i];
+                    staged_any         = true;
+                    plan->input_staged_once[i] = is_weight ? 1 : 0;
+                    // only a DENSE host source goes through the deferred
+                    // pageable H2D; the bounce paths copy with blocking calls
+                    if (t->buffer != nullptr && ggml_backend_buffer_is_host(t->buffer) &&
+                        ggml_is_contiguous(t)) {
+                        staged_host_any = true;
+                    }
+                } else {
+                    dev_ptr = plan->input_staging[i];
+                }
+                if (g_dbg_time.on) {
+                    g_dbg_time.stage_bytes += ggml_nbytes(t);
+                    g_dbg_time.stage_names[t->name] += (double) ggml_nbytes(t);
+                }
+            }            gert::Tensor tensor;
             if (!ggml_cannge_bind_tensor(t, tensor, dev_ptr)) {
                 return GGML_STATUS_FAILED;
             }
             inputs.push_back(std::move(tensor));
         }
-        if (staged_any) {
-            // the staged source is a host tensor whose buffer the CPU allocator
-            // may reuse as soon as this call returns; a deferred pageable H2D
-            // could then read overwritten bytes (F15b pinned-page lesson, same
-            // as cpy_tensor_async). only a stream sync is a correct interlock
+        if (plan->fa_asl_dev != nullptr && io.fa_mask != nullptr) {
+            // IFA actual_seq_lengths: count the visible prefix of the additive
+            // mask (0 = attend, -inf = masked) and upload it; the mask buffer
+            // was refreshed by the scheduler before this split ran
+            ggml_tensor * m    = io.fa_mask;
+            const size_t  es   = ggml_element_size(m);
+            const int64_t n_kv = m->ne[0];
+            std::vector<char> mbuf(n_kv * es);
+            const bool m_host = m->buffer != nullptr && ggml_backend_buffer_is_host(m->buffer);
+            if (m_host) {
+                memcpy(mbuf.data(), m->data, mbuf.size());
+            } else {
+                ACL_CHECK(aclrtSynchronizeStream(ctx->stream));
+                ACL_CHECK(aclrtMemcpy(mbuf.data(), mbuf.size(), m->data, mbuf.size(), ACL_MEMCPY_DEVICE_TO_HOST));
+            }
+            int64_t asl = n_kv;
+            if (es == 2) {
+                for (int64_t i = 0; i < n_kv; i++) {
+                    // signed-value compare: raw fp16 bits are not ordered
+                    if (ggml_fp16_to_fp32(((const ggml_fp16_t *) mbuf.data())[i]) < -1.0e4f) {
+                        asl = i;
+                        break;
+                    }
+                }
+            } else {
+                for (int64_t i = 0; i < n_kv; i++) {
+                    if (((const float *) mbuf.data())[i] < -1.0e4f) {
+                        asl = i;
+                        break;
+                    }
+                }
+            }
+            // blocking copy: an async H2D from a stack scalar would read
+            // garbage once the block returns (F15b family)
+            ACL_CHECK(aclrtMemcpy(plan->fa_asl_dev, 8, &asl, 8, ACL_MEMCPY_HOST_TO_DEVICE));
+            if (getenv("GGML_CANNGE_DEBUG_IO")) {
+                fprintf(stderr, "[DBG-FA] asl=%lld n_kv=%lld es=%zu host=%d mask0=%.1f\n", (long long) asl,
+                        (long long) n_kv, es, (int) m_host,
+                        es == 2 ? ggml_fp16_to_fp32(((const ggml_fp16_t *) mbuf.data())[0])
+                                : ((const float *) mbuf.data())[0]);
+            }
+            gert::Tensor at;
+            at.MutableOriginShape().SetDimNum(1);
+            at.MutableStorageShape().SetDimNum(1);
+            at.MutableOriginShape().SetDim(0, 1);
+            at.MutableStorageShape().SetDim(0, 1);
+            at.SetOriginFormat(ge::FORMAT_ND);
+            at.SetStorageFormat(ge::FORMAT_ND);
+            at.SetPlacement(gert::TensorPlacement::kOnDeviceHbm);
+            at.SetDataType(ge::DT_INT64);
+            at.SetData(gert::TensorData((uint8_t *) plan->fa_asl_dev, nullptr, 8, gert::TensorPlacement::kOnDeviceHbm));
+            inputs.push_back(std::move(at));
+        }
+        const double dbg_t2a = g_dbg_time.on ? g_dbg_time.now() : 0;
+        if (staged_host_any) {
+            // a dense staged host source may be reused by the CPU allocator as
+            // soon as this call returns; the deferred pageable H2D could read
+            // overwritten bytes (F15b pinned-page lesson). the blocking bounce
+            // paths need no drain
             ACL_CHECK(aclrtSynchronizeStream(ctx->stream));
         }
+        const double dbg_t2b = g_dbg_time.on ? g_dbg_time.now() : 0;
         // output ports whose device range overlaps an input range (aliased
         // views, e.g. PERMUTE of an input) must not be bound in place: GE
         // treats undeclared input/output overlap as unvalidated UB and may
@@ -667,6 +696,9 @@ static enum ggml_status ggml_backend_cannge_graph_compute(ggml_backend_t backend
         std::vector<std::pair<size_t, bool>> staged_ports;
         for (size_t i = 0; i < io.output_tensors.size(); i++) {
             ggml_tensor * t = io.output_tensors[i];
+            if (getenv("GGML_CANNGE_DEBUG_IO")) {
+                fprintf(stderr, "[DBG-CPY] out_port %s t->data=%p\n", t->name, t->data);
+            }
             const uint8_t * lo = (const uint8_t *) t->data;
             const uint8_t * hi = lo + ggml_nbytes(t);
             bool overlaps = false;
@@ -686,6 +718,10 @@ static enum ggml_status ggml_backend_cannge_graph_compute(ggml_backend_t backend
                 }
             }
             void * dev_ptr = t->data;
+            if (getenv("GGML_CANNGE_DEBUG_IO")) {
+                fprintf(stderr, "[DBG-CPY] out_check %s t->data=%p span=%zu overlaps=%d strided=%d ins=%zu\n", t->name,
+                        t->data, ggml_nbytes(t), (int) overlaps, (int) strided, input_ranges.size());
+            }
             if (overlaps || strided) {
                 if (plan->staging[i] == nullptr && aclrtMalloc(&plan->staging[i], ggml_nbytes(t), ACL_MEM_MALLOC_HUGE_FIRST) != ACL_SUCCESS) {
                     GGML_LOG_ERROR("%s: failed to allocate staging buffer for output %s (%zu bytes)\n", __func__, t->name,
@@ -764,10 +800,97 @@ static enum ggml_status ggml_backend_cannge_graph_compute(ggml_backend_t backend
                 dbg_sum("in ", io.inputs[i], dev);
             }
         }
+        const double dbg_t3 = g_dbg_time.on ? g_dbg_time.now() : 0;
+
+        // SET_ROWS host snapshot. The scatter below runs after GE execute and
+        // the staged-output copy-backs, but ggml-alloc already considers the
+        // sched split-input copies dead after the last SET_ROWS node: later
+        // tensors in the same graph reuse their bytes, and a copy-back
+        // (e.g. kqv_out over the idx range, FA=on layer-35 crash) clobbers
+        // them before the scatter reads them. Read both tensors into host
+        // scratch at the only points where their content is final: idx
+        // before execute (GE never writes it), data right after execute
+        // (GE output materialization), both before any copy-back runs.
+        std::vector<std::vector<int64_t>> sr_slots;
+        std::vector<std::vector<char>>    sr_data;
+        if (!io.set_rows.empty()) {
+            sr_slots.resize(io.set_rows.size());
+            for (size_t sri = 0; sri < io.set_rows.size(); sri++) {
+                const ggml_cannge_set_rows_op & sr  = io.set_rows[sri];
+                if (sr.in_graph) {
+                    continue; // written by an in-graph GE ScatterUpdate
+                }
+                const int64_t                   nidx = sr.idx->ne[0];
+                const size_t n_slots = (size_t) nidx * sr.idx->ne[1] * sr.idx->ne[2];
+                const bool   idx_host = sr.idx->buffer != nullptr && ggml_backend_buffer_is_host(sr.idx->buffer);
+                if (!idx_host) {
+                    ACL_CHECK(aclrtSynchronizeStream(ctx->stream));
+                }
+                if (sr.idx->type == GGML_TYPE_I64) {
+                    sr_slots[sri].resize(n_slots);
+                    if (idx_host) {
+                        memcpy(sr_slots[sri].data(), sr.idx->data, n_slots * 8);
+                    } else {
+                        ACL_CHECK(aclrtMemcpy(sr_slots[sri].data(), n_slots * 8, sr.idx->data, ggml_nbytes(sr.idx),
+                                              ACL_MEMCPY_DEVICE_TO_HOST));
+                    }
+                } else {
+                    std::vector<int32_t> tmp(n_slots);
+                    if (idx_host) {
+                        memcpy(tmp.data(), sr.idx->data, n_slots * 4);
+                    } else {
+                        ACL_CHECK(aclrtMemcpy(tmp.data(), n_slots * 4, sr.idx->data, ggml_nbytes(sr.idx),
+                                              ACL_MEMCPY_DEVICE_TO_HOST));
+                    }
+                    sr_slots[sri].assign(tmp.begin(), tmp.end());
+                }
+            }
+        }
+
         if (!ctx->ge->execute(plan->graph_id, ctx->stream, inputs, outputs, err)) {
             GGML_LOG_ERROR("%s: execute failed: %s\n", __func__, err.c_str());
             plan->state = ggml_cannge_plan::FAILED;
             return GGML_STATUS_FAILED;
+        }
+        const double dbg_t4 = g_dbg_time.on ? g_dbg_time.now() : 0;
+
+        // data half of the SET_ROWS snapshot: GE has just materialized any
+        // in-graph producer at t->data, and the sched has refreshed any
+        // split-input copy before this split ran - but the copy-backs below
+        // may overwrite the bytes before the scatter runs (see note above).
+        // Staged outputs are the exception: their t->data is only filled by
+        // the copy-back loop, so they are snapshotted after it.
+        std::vector<bool> sr_data_staged(io.set_rows.size(), false);
+        if (!io.set_rows.empty()) {
+            sr_data.resize(io.set_rows.size());
+            for (size_t sri = 0; sri < io.set_rows.size(); sri++) {
+                const ggml_cannge_set_rows_op & sr = io.set_rows[sri];
+                if (sr.in_graph) {
+                    continue; // written by an in-graph GE ScatterUpdate
+                }
+                bool staged = false;
+                for (const auto & sp : staged_ports) {
+                    if (io.output_tensors[sp.first] == sr.data) {
+                        staged = true;
+                        break;
+                    }
+                }
+                sr_data_staged[sri] = staged;
+                if (staged) {
+                    continue;
+                }
+                const bool data_host = sr.data->buffer != nullptr && ggml_backend_buffer_is_host(sr.data->buffer);
+                sr_data[sri].resize(ggml_nbytes(sr.data));
+                if (data_host) {
+                    memcpy(sr_data[sri].data(), sr.data->data, sr_data[sri].size());
+                } else {
+                    // produced or refreshed on this stream just above: enqueue
+                    // the D2H on the same stream, one shared drain after the
+                    // copy-back loop covers all set_rows (was a per-row sync)
+                    ACL_CHECK(aclrtMemcpyAsync(sr_data[sri].data(), sr_data[sri].size(), sr.data->data,
+                                               sr_data[sri].size(), ACL_MEMCPY_DEVICE_TO_HOST, ctx->stream));
+                }
+            }
         }
 
         // staged output ports: host-aware copy from staging into the real ggml
@@ -775,6 +898,10 @@ static enum ggml_status ggml_backend_cannge_graph_compute(ggml_backend_t backend
         // ggml calls ggml_backend_synchronize
         for (const auto & sp : staged_ports) {
             ggml_tensor * t = io.output_tensors[sp.first];
+            if (getenv("GGML_CANNGE_DEBUG_IO")) {
+                fprintf(stderr, "[DBG-CPY] staged_port out %s t->data=%p staging=%p nb=%zu\n", t->name, t->data,
+                        (void *) plan->staging[sp.first], ggml_nbytes(t));
+            }
             if (sp.second) {
                 ggml_cannge_strided_copy(t, plan->staging[sp.first], true, ctx->stream);
             } else {
@@ -782,6 +909,42 @@ static enum ggml_status ggml_backend_cannge_graph_compute(ggml_backend_t backend
                 const aclrtMemcpyKind kind = host ? ACL_MEMCPY_DEVICE_TO_HOST : ACL_MEMCPY_DEVICE_TO_DEVICE;
                 ACL_CHECK(aclrtMemcpyAsync(t->data, ggml_nbytes(t), plan->staging[sp.first], ggml_nbytes(t),
                                            kind, ctx->stream));
+            }
+        }
+
+        // SET_ROWS snapshot for staged outputs: t->data was filled by the
+        // copy-back loop above. One shared drain covers those copy-backs and
+        // every async D2H issued in the pre-loop (was a per-row sync)
+        bool any_sr_data = false;
+        for (size_t sri = 0; sri < io.set_rows.size(); sri++) {
+            if (!io.set_rows[sri].in_graph && !sr_data_staged[sri]) {
+                const ggml_tensor * d = io.set_rows[sri].data;
+                if (d != nullptr && !(d->buffer != nullptr && ggml_backend_buffer_is_host(d->buffer))) {
+                    any_sr_data = true;
+                }
+            }
+            if (sr_data_staged[sri] && !io.set_rows[sri].in_graph) {
+                any_sr_data = true;
+            }
+        }
+        if (any_sr_data) {
+            ACL_CHECK(aclrtSynchronizeStream(ctx->stream));
+        }
+        for (size_t sri = 0; sri < io.set_rows.size(); sri++) {
+            if (!sr_data_staged[sri]) {
+                continue;
+            }
+            const ggml_cannge_set_rows_op & sr = io.set_rows[sri];
+            if (sr.in_graph) {
+                continue; // written by an in-graph GE ScatterUpdate
+            }
+            const bool data_host = sr.data->buffer != nullptr && ggml_backend_buffer_is_host(sr.data->buffer);
+            sr_data[sri].resize(ggml_nbytes(sr.data));
+            if (data_host) {
+                memcpy(sr_data[sri].data(), sr.data->data, sr_data[sri].size());
+            } else {
+                ACL_CHECK(aclrtMemcpy(sr_data[sri].data(), sr_data[sri].size(), sr.data->data, sr_data[sri].size(),
+                                      ACL_MEMCPY_DEVICE_TO_HOST));
             }
         }
 
@@ -806,49 +969,25 @@ static enum ggml_status ggml_backend_cannge_graph_compute(ggml_backend_t backend
         }
 
         // KV cache row scatter (SET_ROWS): dst[slot, i2, i3] = data[i, i2, i3]
-        // with slot = idx[i, i2%ne12, i3%ne13], ggml-cpu ops.cpp set_rows_impl
-        for (const ggml_cannge_set_rows_op & sr : io.set_rows) {
+        // with slot = idx[i, i2%ne12, i3%ne13], ggml-cpu ops.cpp set_rows_impl.
+        // slots and row bytes come from the host snapshots taken around GE
+        // execute: the ggml buffers may have been reused by later tensors in
+        // this graph before this post-execute scatter runs (see snapshot note)
+        for (size_t sri = 0; sri < io.set_rows.size(); sri++) {
+            const ggml_cannge_set_rows_op & sr = io.set_rows[sri];
+            if (sr.in_graph) {
+                continue; // written by an in-graph GE ScatterUpdate
+            }
             const int64_t nidx    = sr.idx->ne[0];
-            const size_t  n_slots = (size_t) nidx * sr.idx->ne[1] * sr.idx->ne[2];
-            const bool    idx_host = sr.idx->buffer != nullptr && ggml_backend_buffer_is_host(sr.idx->buffer);
-            // indices may have been produced on this stream just before: sync
-            if (!idx_host) {
-                ACL_CHECK(aclrtSynchronizeStream(ctx->stream));
-            }
-            std::vector<int64_t> slots64;
-            const int64_t *      slots = nullptr;
-            if (sr.idx->type == GGML_TYPE_I64) {
-                slots64.resize(n_slots);
-                if (idx_host) {
-                    memcpy(slots64.data(), sr.idx->data, n_slots * 8);
-                } else {
-                    ACL_CHECK(aclrtMemcpy(slots64.data(), n_slots * 8, sr.idx->data, ggml_nbytes(sr.idx),
-                                          ACL_MEMCPY_DEVICE_TO_HOST));
-                }
-            } else {
-                std::vector<int32_t> tmp(n_slots);
-                if (idx_host) {
-                    memcpy(tmp.data(), sr.idx->data, n_slots * 4);
-                } else {
-                    ACL_CHECK(aclrtMemcpy(tmp.data(), n_slots * 4, sr.idx->data, ggml_nbytes(sr.idx),
-                                          ACL_MEMCPY_DEVICE_TO_HOST));
-                }
-                slots64.assign(tmp.begin(), tmp.end());
-            }
-            slots = slots64.data();
-            const bool    data_host = sr.data->buffer != nullptr && ggml_backend_buffer_is_host(sr.data->buffer);
+            const int64_t * slots = sr_slots[sri].data();
             const bool    dst_host  = sr.dst->buffer  != nullptr && ggml_backend_buffer_is_host(sr.dst->buffer);
             const size_t  es_d      = ggml_element_size(sr.data);
             const size_t  es_t      = ggml_element_size(sr.dst);
             // host-side cast scratch for the f32 rope output -> f16 cache case;
-            // device-resident data rows are staged to host (D2H) before the cast
+            // the snapshot is already host-resident, no per-row staging needed
             std::vector<char> cast_buf;
-            std::vector<char> stage_row;
             if (es_d != es_t) {
                 cast_buf.resize((size_t) sr.data->ne[0] * es_t);
-                if (!data_host) {
-                    stage_row.resize((size_t) sr.data->ne[0] * es_d);
-                }
             }
             for (int64_t i3 = 0; i3 < sr.data->ne[3]; i3++) {
                 for (int64_t i2 = 0; i2 < sr.data->ne[2]; i2++) {
@@ -857,46 +996,40 @@ static enum ggml_status ggml_backend_cannge_graph_compute(ggml_backend_t backend
                     for (int64_t i = 0; i < nidx; i++) {
                         const int64_t sl =
                             slots[(size_t) i + (size_t) i11 * nidx + (size_t) i12 * nidx * sr.idx->ne[1]];
-                        const char * src = (const char *) sr.data->data + i * sr.data->nb[1] + i2 * sr.data->nb[2] +
+                        const char * src = sr_data[sri].data() + i * sr.data->nb[1] + i2 * sr.data->nb[2] +
                                            i3 * sr.data->nb[3];
+                        if (getenv("GGML_CANNGE_DEBUG_IO") && i == 0 && i2 == 0 && i3 == 0) {
+                            fprintf(stderr,
+                                    "[DBG-CPY] set_rows %s(data=%p dst=%p dsth=%d sl0=%lld idx=%s(%p,raw snap=%lld nb=%zu)\n",
+                                    sr.data->name, sr.data->data, sr.dst->data, (int) dst_host,
+                                    (long long) slots[0], sr.idx->name, sr.idx->data,
+                                    (long long) slots[0], ggml_nbytes(sr.idx));
+                        }
                         char * dst_row = (char *) sr.dst->data + (size_t) sl * sr.dst->nb[1] + i2 * sr.dst->nb[2] +
                                          i3 * sr.dst->nb[3];
                         const size_t row_dst = (size_t) sr.data->ne[0] * es_t;
                         if (es_d == es_t) {
                             if (getenv("GGML_CANNGE_DEBUG_COMPILE")) {
-                                fprintf(stderr, "[DBG-SR] row %s->%s src=%p dst=%p dh=%d dsth=%d\n",
-                                        sr.data->name, sr.dst->name, src, dst_row,
-                                        (int) data_host, (int) dst_host);
+                                fprintf(stderr, "[DBG-SR] row %s->%s src=%p dst=%p dsth=%d\n",
+                                        sr.data->name, sr.dst->name, src, dst_row, (int) dst_host);
                             }
-                            if (data_host && dst_host) {
+                            if (dst_host) {
                                 memcpy(dst_row, src, row_dst);
-                            } else if (data_host && !dst_host) {
-                                ACL_CHECK(aclrtMemcpyAsync(dst_row, row_dst, src, row_dst,
-                                                           ACL_MEMCPY_HOST_TO_DEVICE, ctx->stream));
-                            } else if (!data_host && dst_host) {
-                                ACL_CHECK(aclrtMemcpyAsync(dst_row, row_dst, src, row_dst,
-                                                           ACL_MEMCPY_DEVICE_TO_HOST, ctx->stream));
                             } else {
                                 ACL_CHECK(aclrtMemcpyAsync(dst_row, row_dst, src, row_dst,
-                                                           ACL_MEMCPY_DEVICE_TO_DEVICE, ctx->stream));
+                                                           ACL_MEMCPY_HOST_TO_DEVICE, ctx->stream));
                             }
                         } else {
-                            const char * srow = src;
-                            if (!data_host) {
-                                ACL_CHECK(aclrtMemcpy(stage_row.data(), stage_row.size(), src, stage_row.size(),
-                                                      ACL_MEMCPY_DEVICE_TO_HOST));
-                                srow = stage_row.data();
-                            }
                             // cast in host memory, then copy to the destination side
                             if (sr.data->type == GGML_TYPE_F32 && sr.dst->type == GGML_TYPE_F16) {
                                 for (int64_t e = 0; e < sr.data->ne[0]; e++) {
                                     ((ggml_fp16_t *) cast_buf.data())[e] =
-                                        ggml_fp32_to_fp16(((const float *) srow)[e]);
+                                        ggml_fp32_to_fp16(((const float *) src)[e]);
                                 }
                             } else {
                                 for (int64_t e = 0; e < sr.data->ne[0]; e++) {
                                     ((float *) cast_buf.data())[e] =
-                                        ggml_fp16_to_fp32(((const ggml_fp16_t *) srow)[e]);
+                                        ggml_fp16_to_fp32(((const ggml_fp16_t *) src)[e]);
                                 }
                             }
                             if (dst_host) {
@@ -974,11 +1107,68 @@ static enum ggml_status ggml_backend_cannge_graph_compute(ggml_backend_t backend
                 fprintf(stderr, "\n");
             }
         }
+        if (g_dbg_time.on) {
+            const double t = g_dbg_time.now();
+            g_dbg_time.analyze += dbg_t1 - dbg_t0;
+            g_dbg_time.lookup += dbg_t2 - dbg_t1;
+            g_dbg_time.sig += dbg_t1a - dbg_t1;
+            g_dbg_time.find += dbg_t2 - dbg_t1a;
+            g_dbg_time.bind += dbg_t3 - dbg_t2;
+            g_dbg_time.stage += dbg_t2a - dbg_t2;
+            g_dbg_time.stage_sync += dbg_t2b - dbg_t2a;
+            g_dbg_time.obind += dbg_t3 - dbg_t2b;
+            g_dbg_time.exec += dbg_t4 - dbg_t3;
+            g_dbg_time.post += t - dbg_t4;
+            g_dbg_time.total += t - dbg_t0;
+            if (++g_dbg_time.calls % 1000 == 0) g_dbg_time.dump();
+        }
         return GGML_STATUS_SUCCESS;
     }
 
     return GGML_STATUS_FAILED;
 }
+
+// split-boundary events: let the scheduler use stream-level waits instead
+// of a full host sync at every split boundary (the n_copies=1 fallback). The
+// sched only reaches these when events exist (created per backend below and
+// in ggml-backend.cpp for n_copies==1)
+static ggml_backend_event_t ggml_backend_cannge_device_event_new(ggml_backend_dev_t dev) {
+    ggml_backend_cannge_device_context * dev_ctx = (ggml_backend_cannge_device_context *) dev->context;
+    ggml_backend_cannge_set_device(dev_ctx->device);
+    aclrtEvent ev = nullptr;
+    if (aclrtCreateEvent(&ev) != ACL_SUCCESS || ev == nullptr) {
+        return nullptr;
+    }
+    auto * event = new ggml_backend_event{ dev, (void *) ev };
+    return event;
+}
+
+static void ggml_backend_cannge_device_event_free(ggml_backend_dev_t dev, ggml_backend_event_t event) {
+    GGML_UNUSED(dev);
+    ggml_backend_cannge_device_context * dev_ctx = (ggml_backend_cannge_device_context *) event->device->context;
+    ggml_backend_cannge_set_device(dev_ctx->device);
+    ACL_CHECK(aclrtDestroyEvent((aclrtEvent) event->context));
+    delete event;
+}
+
+static void ggml_backend_cannge_device_event_synchronize(ggml_backend_dev_t dev, ggml_backend_event_t event) {
+    ggml_backend_cannge_device_context * dev_ctx = (ggml_backend_cannge_device_context *) dev->context;
+    ggml_backend_cannge_set_device(dev_ctx->device);
+    ACL_CHECK(aclrtSynchronizeEvent((aclrtEvent) event->context));
+}
+
+static void ggml_backend_cannge_event_record(ggml_backend_t backend, ggml_backend_event_t event) {
+    ggml_backend_cannge_context * ctx = (ggml_backend_cannge_context *) backend->context;
+    ggml_backend_cannge_set_device(ctx->device);
+    ACL_CHECK(aclrtRecordEvent((aclrtEvent) event->context, ctx->stream));
+}
+
+static void ggml_backend_cannge_event_wait(ggml_backend_t backend, ggml_backend_event_t event) {
+    ggml_backend_cannge_context * ctx = (ggml_backend_cannge_context *) backend->context;
+    ggml_backend_cannge_set_device(ctx->device);
+    ACL_CHECK(aclrtStreamWaitEvent(ctx->stream, (aclrtEvent) event->context));
+}
+
 
 static const ggml_backend_i ggml_backend_cannge_interface = {
     /* .get_name                = */ ggml_backend_cannge_get_name,
@@ -994,8 +1184,8 @@ static const ggml_backend_i ggml_backend_cannge_interface = {
     /* .graph_plan_update       = */ nullptr,
     /* .graph_plan_compute      = */ nullptr,
     /* .graph_compute           = */ ggml_backend_cannge_graph_compute,
-    /* .event_record            = */ nullptr,
-    /* .event_wait              = */ nullptr,
+    /* .event_record            = */ ggml_backend_cannge_event_record,
+    /* .event_wait              = */ ggml_backend_cannge_event_wait,
     /* .graph_optimize          = */ nullptr,
 };
 
@@ -1051,361 +1241,6 @@ static ggml_backend_buffer_type_t ggml_backend_cannge_device_get_buffer_type(ggm
     return ggml_backend_cannge_buffer_type(dev_ctx->device);
 }
 
-static bool ggml_cannge_float_dtype(enum ggml_type type) {
-    return type == GGML_TYPE_F16 || type == GGML_TYPE_F32;
-}
-
-// L0 static capability table (docs/cannge D3): doc-supported (op, dtype,
-// shape) combos only, conservative rejects are by design; GE adds/Mul broadcast
-// dims that are equal or 1, MatMul contraction is ne0 of both operands
-static bool ggml_backend_cannge_device_supports_op(ggml_backend_dev_t dev, const ggml_tensor * op) {
-    GGML_UNUSED(dev);
-
-    if (!ggml_backend_cannge_graph_env_enabled()) {
-        return false;
-    }
-
-    // leaf tensors carry no compute, every backend accepts them
-    if (op->op == GGML_OP_NONE) {
-        return true;
-    }
-
-    // debug knob: reject every compute op, isolates backend-presence effects
-    // (buffer assignment, boundary copies) from op-mapping correctness
-    if (getenv("GGML_CANNGE_DISABLE_ALL")) {
-        return false;
-    }
-
-    // in-place variants write the result back into src[i]'s buffer; GE
-    // drops aliased output writes (910B silent, note-10 F1). The *_inplace
-    // builders also alias through view_src (out is a view of src0), same
-    // dropped-write hazard (note-10 F8); metadata view ops are exempt.
-    // SET_ROWS also views its target (src[2]), but the write is applied by
-    // the backend explicitly after execute, so it is exempt as well
-    if (op->op != GGML_OP_VIEW && op->op != GGML_OP_PERMUTE && op->op != GGML_OP_TRANSPOSE &&
-        op->op != GGML_OP_RESHAPE && op->op != GGML_OP_CPY && op->op != GGML_OP_SET_ROWS &&
-        op->view_src != nullptr) {
-        return false;
-    }
-    for (int i = 0; i < GGML_MAX_SRC; i++) {
-        if (op->src[i] == op) {
-            return false;
-        }
-    }
-
-    const struct ggml_tensor * src0 = op->src[0];
-    const struct ggml_tensor * src1 = op->src[1];
-
-    switch (op->op) {
-        case GGML_OP_ADD:
-        case GGML_OP_SUB:
-        case GGML_OP_MUL:
-        case GGML_OP_DIV: {
-            if (getenv("GGML_CANNGE_NO_ADDMUL")) {
-                return false; // debug knob
-            }
-            if (src0 == nullptr || src1 == nullptr || !ggml_cannge_float_dtype(op->type)) {
-                return false;
-            }
-            if (!ggml_cannge_float_dtype(src0->type) || !ggml_cannge_float_dtype(src1->type)) {
-                return false;
-            }
-            for (int d = 0; d < GGML_MAX_DIMS; d++) {
-                if (src0->ne[d] != src1->ne[d] && src0->ne[d] != 1 && src1->ne[d] != 1) {
-                    return false;
-                }
-            }
-            return true;
-        }
-
-        case GGML_OP_SCALE:
-            return src0 != nullptr && ggml_cannge_float_dtype(src0->type) && ggml_cannge_float_dtype(op->type);
-
-        case GGML_OP_SOFT_MAX: {
-            if (getenv("GGML_CANNGE_NO_SOFTMAX")) {
-                return false; // debug knob: bisect the frozen-argmax corruption
-            }
-            if (src0 == nullptr || !ggml_cannge_float_dtype(src0->type) ||
-                !ggml_cannge_float_dtype(op->type)) {
-                return false;
-            }
-            float scale = 1.0f;
-            float max_bias = 0.0f;
-            std::memcpy(&scale, (const float *) op->op_params + 0, sizeof(scale));
-            std::memcpy(&max_bias, (const float *) op->op_params + 1, sizeof(max_bias));
-            // attention sinks (src[2]) and ALiBi slopes have no GE mapping yet
-            if (op->src[2] != nullptr || max_bias != 0.0f) {
-                return false;
-            }
-            // optional mask, added after scaling; row width must match, other
-            // dims broadcast like ADD (GE equal-or-1, docs/cannge note-7)
-            if (src1 != nullptr) {
-                if (!ggml_cannge_float_dtype(src1->type) || src1->ne[0] != src0->ne[0]) {
-                    return false;
-                }
-                for (int d = 1; d < GGML_MAX_DIMS; d++) {
-                    if (src1->ne[d] != 1 && src0->ne[d] != src1->ne[d]) {
-                        return false;
-                    }
-                }
-            }
-            return true;
-        }
-
-        case GGML_OP_UNARY: {
-            if (getenv("GGML_CANNGE_NO_UNARY")) {
-                return false; // debug knob
-            }
-            if (src0 == nullptr || !ggml_cannge_float_dtype(src0->type) || !ggml_cannge_float_dtype(op->type)) {
-                return false;
-            }
-            switch (ggml_get_unary_op(op)) {
-                case GGML_UNARY_OP_SILU:
-                case GGML_UNARY_OP_ABS:
-                case GGML_UNARY_OP_SGN:
-                case GGML_UNARY_OP_NEG:
-                case GGML_UNARY_OP_TANH:
-                case GGML_UNARY_OP_RELU:
-                case GGML_UNARY_OP_SIGMOID:
-                case GGML_UNARY_OP_GELU:
-                case GGML_UNARY_OP_GELU_ERF:
-                case GGML_UNARY_OP_GELU_QUICK:
-                case GGML_UNARY_OP_EXP:
-                case GGML_UNARY_OP_FLOOR:
-                case GGML_UNARY_OP_CEIL:
-                case GGML_UNARY_OP_ROUND:
-                case GGML_UNARY_OP_TRUNC:
-                    return true;
-                default:
-                    // STEP has no es_math counterpart; ELU and the rest unmapped
-                    return false;
-            }
-        }
-
-        case GGML_OP_NORM:
-            return src0 != nullptr && ggml_cannge_float_dtype(src0->type) && ggml_cannge_float_dtype(op->type);
-
-        case GGML_OP_RMS_NORM:
-            if (getenv("GGML_CANNGE_NO_RMS")) {
-                return false; // debug knob
-            }
-            // ADD->RMS->(weight MUL) merged subgraphs corrupt at model scale on
-            // 910B (minimal pair repro: RMS+ADDMUL knobs -> garbage tokens, all
-            // unit probes of the chain pass -> suspected alloc/stream interplay,
-            // note-33). producer-gate keeps standalone RMS (r1 clean) on CANNGE.
-            if (src0 != nullptr && (src0->op == GGML_OP_ADD || src0->op == GGML_OP_SUB ||
-                                    src0->op == GGML_OP_MUL || src0->op == GGML_OP_DIV)) {
-                return false;
-            }
-            return src0 != nullptr && ggml_cannge_float_dtype(src0->type) && ggml_cannge_float_dtype(op->type);
-
-        case GGML_OP_MUL_MAT: {
-            if (getenv("GGML_CANNGE_NO_MATMUL")) {
-                return false; // debug knob: force matmuls to CPU for bisection
-            }
-            if (src0 == nullptr || src1 == nullptr || !ggml_cannge_float_dtype(op->type)) {
-                return false;
-            }
-            // both operands must share the contraction dtype; FP32 computes in
-            // FP16 on 310P internally (note-7), still accepted here
-            if (src0->type != src1->type || !ggml_cannge_float_dtype(src0->type)) {
-                return false;
-            }
-            if (src0->ne[0] != src1->ne[0]) {
-                return false; // contraction dim mismatch
-            }
-            // 32-byte alignment of M/N/K: not in the op spec (the aclnn spec
-            // has no alignment constraint and allows non-contiguous inputs),
-            // but the GE graph-compile tiling path hard-fails unaligned
-            // MatMul shapes (CheckDimsAligned310P, EZ9999) on 310P and 910B
-            // alike; reject conservatively, product-independent. 未文档化，
-            // 依据见 note-10 F3
-            // spec: <https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/latest/API/aolapi/context/ops-nn/aclnnMatmul.md>
-#ifdef ASCEND_310P
-            // 310P TBE registers fp16 only, so GE down-converts F32 matmul inputs
-            // to fp16 before the tiling check (F7, note-10): the 32B rule applies
-            // to the fp16 element size, F32 needs 16 elements (note-16 known precision)
-            const size_t align_elems = src0->type == GGML_TYPE_F32 ? 16 : 32 / ggml_type_size(src0->type);
-#else
-            const size_t align_elems = 32 / ggml_type_size(src0->type);
-#endif
-            if (src0->ne[0] % align_elems != 0 || src0->ne[1] % align_elems != 0 || src1->ne[1] % align_elems != 0) {
-                return false;
-            }
-            // operands must be dense: permuted leaves are non-dense graph IO and
-            // need staged copies (note-14); internal permutes stay graph-internal
-            if (!ggml_is_contiguous(src0) || !ggml_is_contiguous(src1)) {
-                return false;
-            }
-            // 2D and batched (3D/4D) matmul: leading batch dims must match,
-            // GE BatchMatMulV3 batches on the outermost dims; contraction stays ne0
-            if (ggml_n_dims(src0) != ggml_n_dims(src1)) {
-                return false;
-            }
-            // GE silently returns zeros for weights above ~256K elements
-            // (isolated repro: k=n=512 OK, 640+ zero output, f16 and f32
-            // alike; 未文档化, pending the raw-op BatchMatMulV2 path with an
-            // explicit output desc, same recipe as JittorInfer)
-            if (src0->ne[0] * src0->ne[1] > 262144) {
-                return false;
-            }
-            return ggml_n_dims(src0) >= 2 && ggml_n_dims(src0) <= 4 && src0->ne[2] == src1->ne[2] &&
-                   src0->ne[3] == src1->ne[3];
-        }
-
-        case GGML_OP_RESHAPE:
-        case GGML_OP_PERMUTE:
-        case GGML_OP_TRANSPOSE:
-            return src0 != nullptr && ggml_cannge_float_dtype(src0->type) && ggml_cannge_float_dtype(op->type);
-
-        case GGML_OP_VIEW:
-            // mirror the build precondition: dense strides only, the Slice path
-            // needs standard contiguous layout relative to the view
-            return src0 != nullptr && ggml_cannge_float_dtype(src0->type) && ggml_cannge_float_dtype(op->type) &&
-                   ggml_is_contiguous(op);
-
-        case GGML_OP_CONT:
-            // mirror the build precondition: only contiguous inputs can alias
-            return src0 != nullptr && ggml_cannge_float_dtype(src0->type) && ggml_cannge_float_dtype(op->type) &&
-                   ggml_is_contiguous(src0);
-
-        case GGML_OP_CPY:
-            // F16 <-> F32 via Cast; aliased same-dtype copies into views are
-            // rejected until the writeback mechanism is enabled
-            if (src0 == nullptr || src1 == nullptr || !ggml_cannge_float_dtype(src0->type) ||
-                !ggml_cannge_float_dtype(op->type)) {
-                return false;
-            }
-            if (!ggml_are_same_shape(src0, src1)) {
-                return false;
-            }
-            return src1->view_src == nullptr && ggml_is_contiguous(src1);
-
-        case GGML_OP_DUP:
-            // same-dtype copy into the node's own buffer (in-place variants are
-            // rejected by the generic view_src check above); the build aliases
-            // src0 and analyze forces a GE output port for the copy. a
-            // non-dense src0 keeps failing numerics through the alias+port
-            // path (unlike ADD/MUL which consume the staged input in a real
-            // op) - reject it, contiguous copies stay supported
-            return src0 != nullptr && ggml_cannge_float_dtype(src0->type) && ggml_cannge_float_dtype(op->type) &&
-                   ggml_is_contiguous(src0);
-
-        case GGML_OP_GET_ROWS:
-            if (getenv("GGML_CANNGE_NO_GET_ROWS")) {
-                return false; // debug knob
-            }
-            // single-row tables miscompile on GE: GatherV2 infers a [1,1]
-            // output and GE writes one element, the ggml buffer stays zero
-            // (probe ggml_probe_gr0, 910B3 repro; embedding gather unaffected)
-            if (src0 != nullptr && src0->ne[1] == 1) {
-                return false;
-            }
-            return src0 != nullptr && src1 != nullptr && ggml_cannge_float_dtype(src0->type) &&
-                   src1->type == GGML_TYPE_I32 && ggml_cannge_float_dtype(op->type);
-
-        case GGML_OP_SET_ROWS: {
-            // KV cache write: a[src[1][i]] = src[0][i] per row, applied by the
-            // backend as post-execute D2D row copies (no GE scatter needed);
-            // ggml.c ggml_set_rows: src0 = row data, src1 = indices, src2 = cache
-            const struct ggml_tensor * data = op->src[0];
-            const struct ggml_tensor * idx  = op->src[1];
-            const struct ggml_tensor * dst  = op->src[2];
-            if (data == nullptr || idx == nullptr || dst == nullptr) {
-                return false;
-            }
-            // dtype mismatch (f32 rope output -> f16 cache) is handled by a
-            // host-side cast in the scatter when the data sits in host memory
-            if (!ggml_cannge_float_dtype(data->type) || !ggml_cannge_float_dtype(dst->type) ||
-                (idx->type != GGML_TYPE_I32 && idx->type != GGML_TYPE_I64)) {
-                return false;
-            }
-            if (data->ne[0] != dst->ne[0] || data->ne[2] != dst->ne[2] || data->ne[3] != dst->ne[3]) {
-                return false;
-            }
-            return ggml_is_contiguous_rows(data) && ggml_is_contiguous_rows(dst) && ggml_is_contiguous(dst);
-        }
-
-        case GGML_OP_CONCAT: {
-            if (src0 == nullptr || src1 == nullptr || !ggml_cannge_float_dtype(op->type)) {
-                return false;
-            }
-            if (src0->type != src1->type || !ggml_cannge_float_dtype(src0->type)) {
-                return false;
-            }
-            const int axis = (int) op->op_params[0];
-            if (axis < 0 || axis >= GGML_MAX_DIMS) {
-                return false;
-            }
-            for (int d = 0; d < GGML_MAX_DIMS; d++) {
-                if (d != axis && src0->ne[d] != src1->ne[d]) {
-                    return false;
-                }
-            }
-            return true;
-        }
-
-        case GGML_OP_GLU: {
-            // single-input glu only: y = act(first half of ne[0]) * second half
-            // (ggml-cpu ops.cpp ggml_compute_forward_reglu_f32). The swapped
-            // forms, two-input splits and the clamp/oai variants stay on CPU
-            if (src0 == nullptr || src1 != nullptr || !ggml_cannge_float_dtype(src0->type) ||
-                !ggml_cannge_float_dtype(op->type) || op->type != src0->type) {
-                return false;
-            }
-            if (ggml_get_op_params_i32(op, 1) != 0 || src0->ne[0] % 2 != 0 || !ggml_is_contiguous(src0)) {
-                return false;
-            }
-            switch (ggml_get_glu_op(op)) {
-                case GGML_GLU_OP_REGLU:
-                case GGML_GLU_OP_GEGLU:
-                case GGML_GLU_OP_SWIGLU:
-                case GGML_GLU_OP_GEGLU_ERF:
-                case GGML_GLU_OP_GEGLU_QUICK:
-                    return true;
-                default:
-                    return false;
-            }
-        }
-
-        case GGML_OP_ROPE: {
-            if (getenv("GGML_CANNGE_NO_ROPE")) {
-                return false; // debug knob
-            }
-            // minimal subset: full-head NORMAL/NEOX rotation, no YaRN scaling
-            // (freq_scale/ext/attn/betas at defaults), no freq factors (src2),
-            // no n_offs; cos/sin tables are built inside the graph from src1
-            const struct ggml_tensor * src2 = op->src[2];
-            if (src0 == nullptr || src1 == nullptr || src2 != nullptr || !ggml_cannge_float_dtype(src0->type) ||
-                op->type != src0->type || src1->type != GGML_TYPE_I32) {
-                return false;
-            }
-            const int n_dims = ggml_get_op_params_i32(op, 1);
-            const int mode   = ggml_get_op_params_i32(op, 2);
-            if ((mode != GGML_ROPE_TYPE_NORMAL && mode != GGML_ROPE_TYPE_NEOX) || n_dims != src0->ne[0] ||
-                n_dims % 2 != 0 || ggml_get_op_params_i32(op, 15) != 0) {
-                return false;
-            }
-            // op_params floats: [5]freq_base [6]freq_scale [7]ext_factor
-            // [8]attn_factor [9]beta_fast [10]beta_slow (ggml.c ggml_rope_impl)
-            if (ggml_get_op_params_f32(op, 6) != 1.0f || ggml_get_op_params_f32(op, 7) != 0.0f ||
-                ggml_get_op_params_f32(op, 8) != 1.0f || ggml_get_op_params_f32(op, 9) != 0.0f ||
-                ggml_get_op_params_f32(op, 10) != 0.0f) {
-                return false;
-            }
-            const int nd = ggml_n_dims(src0);
-            return nd >= 3 && nd <= 4 && ggml_is_contiguous(src0);
-        }
-
-        default:
-            return false;
-    }
-}
-
-static bool ggml_backend_cannge_device_supports_buft(ggml_backend_dev_t dev, ggml_backend_buffer_type_t buft) {
-    GGML_UNUSED(dev);
-    return buft->iface.get_name == ggml_backend_cannge_buffer_type_name;
-}
 
 static const ggml_backend_device_i ggml_backend_cannge_device_interface = {
     /* .get_name             = */ ggml_backend_cannge_device_get_name,
@@ -1420,9 +1255,9 @@ static const ggml_backend_device_i ggml_backend_cannge_device_interface = {
     /* .supports_op          = */ ggml_backend_cannge_device_supports_op,
     /* .supports_buft        = */ ggml_backend_cannge_device_supports_buft,
     /* .offload_op           = */ nullptr,
-    /* .event_new            = */ nullptr,
-    /* .event_free           = */ nullptr,
-    /* .event_synchronize    = */ nullptr,
+    /* .event_new            = */ ggml_backend_cannge_device_event_new,
+    /* .event_free           = */ ggml_backend_cannge_device_event_free,
+    /* .event_synchronize    = */ ggml_backend_cannge_device_event_synchronize,
 };
 
 // registry

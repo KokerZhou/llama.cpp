@@ -79,9 +79,12 @@ if (CANN_INSTALL_DIR)
 
     ggml_add_backend_library(ggml-cannge
                              ggml-cannge.cpp
+                             ggml-cannge-io.cpp
+                             ggml-cannge-gates.cpp
                              plan.cpp
                              ge.cpp
                              graph-build.cpp
+                             graph-build-io.cpp
                             )
 
     target_include_directories(ggml-cannge PRIVATE ${CANN_INCLUDE_DIRS})

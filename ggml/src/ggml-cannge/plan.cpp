@@ -21,10 +21,12 @@
  */
 
 #include "plan.h"
+#include "ggml-cannge-priv.h"
 
 #include "ggml-backend.h"
 #include "ggml-impl.h"
 
+#include <algorithm>
 #include <cstring>
 #include <set>
 #include <unordered_map>
@@ -51,6 +53,19 @@ bool ggml_cannge_resolve_view(ggml_tensor * t, ggml_cannge_view_info & info) {
     info.is_dense = info.nb[0] == ggml_element_size(t);
     for (int i = 1; i < GGML_MAX_DIMS && info.is_dense; i++) {
         info.is_dense = info.nb[i] == info.nb[i - 1] * (size_t) t->ne[i - 1];
+    }
+    return true;
+}
+
+// every step of the view_src chain only relabels bytes (no element transform):
+// such a view of a fresh input buffer already holds the correct content for
+// consumers reading through the view strides, so GE needs no output port
+static bool ggml_cannge_is_rearrange_view(const ggml_tensor * t) {
+    for (const ggml_tensor * cur = t; cur != nullptr && cur->view_src != nullptr; cur = cur->view_src) {
+        if (cur->op != GGML_OP_RESHAPE && cur->op != GGML_OP_PERMUTE && cur->op != GGML_OP_TRANSPOSE &&
+            cur->op != GGML_OP_VIEW && cur->op != GGML_OP_NONE) {
+            return false;
+        }
     }
     return true;
 }
@@ -120,41 +135,52 @@ ggml_tensor * ggml_cannge_resolve_view_base(ggml_tensor * node, const std::set<g
 
     auto rank_of = [](const ggml_tensor * t) { return ggml_n_dims(t); };
 
-    const ggml_tensor * best = nullptr;
-    size_t              best_span = SIZE_MAX;
-    int                 best_rank_pen = 2;
-
-    // Tier 1: registered tensor whose name matches the immediate view_src
-    if (node->view_src != nullptr) {
+    // collect all fits and order them deterministically: tightest span
+    // first, then rank penalty, name, address as the last resort. A pointer-
+    // ordered tie used to pick an arbitrary base when allocator reuse made
+    // several candidates contain the view (rogue shapes, note-46)
+    std::vector<const ggml_tensor *> fits_vec;
+    auto collect = [&](bool name_match_only) {
+        fits_vec.clear();
         for (ggml_tensor * cand : registered) {
-            if (strcmp(cand->name, node->view_src->name) != 0 || !fits(cand)) {
+            if (name_match_only && (node->view_src == nullptr || strcmp(cand->name, node->view_src->name) != 0)) {
                 continue;
             }
-            const size_t span = ggml_nbytes(cand);
-            const int    pen  = rank_of(cand) == node_nd ? 0 : 1;
-            if (pen < best_rank_pen || (pen == best_rank_pen && span < best_span)) {
-                best          = cand;
-                best_span     = span;
-                best_rank_pen = pen;
+            if (fits(cand)) {
+                fits_vec.push_back(cand);
             }
+        }
+        std::sort(fits_vec.begin(), fits_vec.end(), [&](const ggml_tensor * a, const ggml_tensor * b) {
+            const size_t sa = ggml_nbytes(a);
+            const size_t sb = ggml_nbytes(b);
+            if (sa != sb) return sa < sb;
+            const int pa = rank_of(a) == node_nd ? 0 : 1;
+            const int pb = rank_of(b) == node_nd ? 0 : 1;
+            if (pa != pb) return pa < pb;
+            const int c = strcmp(a->name, b->name);
+            if (c != 0) return c < 0;
+            return a < b;
+        });
+    };
+
+    const ggml_tensor * best = nullptr;
+    // Tier 1: registered tensor whose name matches the immediate view_src
+    if (node->view_src != nullptr) {
+        collect(true);
+        if (!fits_vec.empty()) {
+            best = fits_vec.front();
         }
     }
 
     // Tier 2: any registered tensor whose buffer contains node->data
     if (best == nullptr) {
-        best_rank_pen = 2;
-        best_span     = SIZE_MAX;
-        for (ggml_tensor * cand : registered) {
-            if (!fits(cand)) {
-                continue;
+        collect(false);
+        if (!fits_vec.empty()) {
+            if (fits_vec.size() > 1 && getenv("GGML_CANNGE_DEBUG_COMPILE")) {
+                fprintf(stderr, "[DBG-VIEW] view %s: %zu candidate bases, picking %s (span %zu)\n", node->name,
+                        fits_vec.size(), fits_vec.front()->name, ggml_nbytes(fits_vec.front()));
             }
-            const size_t span = ggml_nbytes(cand);
-            const int    pen  = rank_of(cand) == node_nd ? 0 : 1;
-            if (pen < best_rank_pen || (pen == best_rank_pen && span < best_span)) {
-                best          = cand;
-                best_span     = span;
-                best_rank_pen = pen;
-            }
+            best = fits_vec.front();
         }
     }
 
@@ -223,6 +249,27 @@ bool ggml_cannge_plan_analyze(ggml_cgraph * cgraph, ggml_cannge_plan_io & io, st
         }
     }
 
+    // in-graph ScatterUpdate decision (note-48 batch G): KV rows written
+    // inside the GE graph, so in-fragment view chains read the fresh row and
+    // the post-execute host scatter is skipped. Opt out with
+    // GGML_CANNGE_NO_SCATTER=1. I64 indices stay host-side (no GE dtype).
+    std::unordered_map<ggml_tensor *, bool> sr_in_graph;
+    // GE ScatterUpdate/TensorScatterUpdate silently no-op on this stack (probe-
+    // verified, note-49): the in-graph write stays opt-in until a working primitive exists
+    const bool scatter_enabled = getenv("GGML_CANNGE_SCATTER") != nullptr;
+    for (int i = 0; i < n_nodes; i++) {
+        ggml_tensor * node = cgraph->nodes[i];
+        if (ggml_is_empty(node) || node->op != GGML_OP_SET_ROWS) {
+            continue;
+        }
+        const ggml_tensor * data = node->src[0];
+        const ggml_tensor * idx  = node->src[1];
+        const ggml_tensor * dst  = node->src[2];
+        sr_in_graph[node] = scatter_enabled && data != nullptr && idx != nullptr && dst != nullptr &&
+                            ggml_cannge_float_dtype(data->type) && ggml_cannge_float_dtype(dst->type) &&
+                            (idx->type == GGML_TYPE_I32 || idx->type == GGML_TYPE_I64) && ggml_nelements(idx) == 1;
+    }
+
     // external inputs: referenced as src but never produced inside the graph
     // (leafs with op GGML_OP_NONE fall in here naturally), in first reference
     // order; empty tensors are skipped like the graph_compute pre-check
@@ -246,10 +293,46 @@ bool ggml_cannge_plan_analyze(ggml_cgraph * cgraph, ggml_cannge_plan_io & io, st
             if (node->op == GGML_OP_CPY && j == 1) {
                 continue;
             }
-            if (node->op == GGML_OP_SET_ROWS && j == 1) {
-                continue;
+            // SET_ROWS src[1] (idx) is always registered: the fresh-row
+            // splice reads it in-GE and the host scatter reads it post-execute
+            // (it stays tiny; keeping I64 out of the GE dtype check no longer
+            // applies since the splice casts it)
+            // IFA decode carries kv validity in actual_seq_lengths derived
+            // from the additive mask at execute time (note-42)
+            if (node->op == GGML_OP_FLASH_ATTN_EXT && j == 3 && node->src[0] != nullptr &&
+                node->src[0]->ne[1] == 1 && src != nullptr) {
+                io.fa_mask = src;
             }
             if (!ggml_is_empty(src) && !produced.count(src) && !seen_input.count(src)) {
+                // non-dense rearrange view of a dense base (PERMUTE/TRANSPOSE
+                // of the KV cache): register the BASE as the input and let the
+                // build reconstruct the relabel chain in-GE. Binds the dense
+                // buffer directly and skips the strided staging bounce with
+                // its host round-trip and stream drain (note-48).
+                if (src->view_src != nullptr) {
+                    ggml_cannge_view_info vinfo;
+                    if (ggml_cannge_resolve_view(src, vinfo) && !vinfo.is_dense && vinfo.offset == 0 &&
+                        ggml_cannge_is_rearrange_view(src) && ggml_is_contiguous(vinfo.base)) {
+                        // the build reconstructs the relabel in-GE with a
+                        // linear prefix slice on the base: the view span must
+                        // align to the base's inner extent (KV cache views
+                        // span a slot prefix of the context buffer)
+                        const int64_t  b_nd = ggml_n_dims(vinfo.base);
+                        const int64_t  t_el = ggml_nelements(src);
+                        const int64_t  b_el = ggml_nelements(vinfo.base);
+                        int64_t        inner = 1;
+                        for (int64_t k = 0; k + 1 < b_nd; k++) {
+                            inner *= vinfo.base->ne[k];
+                        }
+                        if (t_el <= b_el && (b_nd < 2 || (inner > 0 && t_el % inner == 0))) {
+                            seen_input[src] = true;
+                            src = vinfo.base;
+                            if (seen_input.count(src)) {
+                                continue;
+                            }
+                        }
+                    }
+                }
                 seen_input[src] = true;
                 io.inputs.push_back(src);
             }
@@ -273,16 +356,24 @@ bool ggml_cannge_plan_analyze(ggml_cgraph * cgraph, ggml_cannge_plan_io & io, st
         if (node->op == GGML_OP_NONE) {
             continue;
         }
-        if (n_consumers[node] == 0 || (node->flags & GGML_TENSOR_FLAG_OUTPUT)) {
+        const char * force_out = getenv("GGML_CANNGE_DUMP");
+        if (n_consumers[node] == 0 || (node->flags & GGML_TENSOR_FLAG_OUTPUT) ||
+            (force_out != nullptr && strstr(node->name, force_out) != nullptr)) {
             // a DENSE view that aliases an external input needs no GE output
             // port: consumers read the input buffer through the view strides,
             // the data is already there (the scheduler avoids splitting at
             // views, so this stays an alias-only case). A non-dense view
             // (PERMUTE/TRANSPOSE strides) must be materialized by GE, its
-            // bytes are not present at data in dense order
+            // bytes are not present at data in dense order - EXCEPT when the
+            // whole chain is a pure rearrangement of a plan input: the view
+            // buffer then already presents the rearranged bytes to consumers
+            // (the KV cache transpose; the writeback would rewrite the same
+            // bytes, and its host-round-trip copy-back forces a stream drain
+            // per layer per step)
             if (node->view_src != nullptr) {
                 ggml_cannge_view_info info;
-                if (ggml_cannge_resolve_view(node, info) && info.is_dense && is_input.count(info.base)) {
+                if (ggml_cannge_resolve_view(node, info) && is_input.count(info.base) &&
+                    (info.is_dense || ggml_cannge_is_rearrange_view(node))) {
                     io.io_views.emplace_back(node, info);
                     continue;
                 }
@@ -302,10 +393,38 @@ bool ggml_cannge_plan_analyze(ggml_cgraph * cgraph, ggml_cannge_plan_io & io, st
         if (node->op == GGML_OP_SET && node->src[0] != nullptr && !seen_side_effect.count(node->src[0])) {
             seen_side_effect[node->src[0]] = true;
             io.side_effects.push_back(node->src[0]);
+            // same staleness class as SET_ROWS below: the post-execute
+            // writeback reads the ggml buffer, so an in-graph producer needs
+            // its value materialized there
+            if (produced.count(node->src[0])) {
+                bool already = false;
+                for (ggml_tensor * o : io.outputs) {
+                    if (o == node->src[0]) { already = true; break; }
+                }
+                if (!already) {
+                    io.outputs.push_back(node->src[0]);
+                }
+            }
         }
         if (node->op == GGML_OP_SET_ROWS && node->src[0] != nullptr && node->src[1] != nullptr &&
             node->src[2] != nullptr) {
-            io.set_rows.push_back({ node->src[2], node->src[0], node->src[1] });
+            io.set_rows.push_back({ node->src[2], node->src[0], node->src[1], sr_in_graph[node] });
+            // the scatter runs post-execute and reads the data tensor's ggml
+            // buffer. When the data is produced inside this graph (e.g. rope
+            // on CANNGE feeding the KV write) GE keeps it in its own workspace
+            // and never writes the ggml address - the scatter would copy stale
+            // bytes into the cache (rope-on KV-on corruption, note-40). Force
+            // a GE output port so the value is materialized at t->data.
+            // In-graph scatters read the GE tensor directly: no port needed.
+            if (!sr_in_graph[node] && produced.count(node->src[0])) {
+                bool already = false;
+                for (ggml_tensor * o : io.outputs) {
+                    if (o == node->src[0]) { already = true; break; }
+                }
+                if (!already) {
+                    io.outputs.push_back(node->src[0]);
+                }
+            }
         }
     }
 

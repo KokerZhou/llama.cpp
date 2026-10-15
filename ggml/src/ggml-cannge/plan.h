@@ -49,11 +49,15 @@ struct ggml_cannge_writeback {
 };
 
 // KV cache row scatter (GGML_OP_SET_ROWS): dst view of the cache, data the new
-// rows, idx the I32 slot positions; applied as D2D row copies after execute
+// rows, idx the I32 slot positions. in_graph: the write is a GE ScatterUpdate
+// inside the compiled graph (fresh rows visible to in-fragment view chains;
+// no post-execute host scatter); otherwise applied as D2D row copies after
+// execute
 struct ggml_cannge_set_rows_op {
-    ggml_tensor * dst  = nullptr; // src[2] of the node, the cache view
-    ggml_tensor * data = nullptr; // src[0], contiguous rows
-    ggml_tensor * idx  = nullptr; // src[1], I32 indices
+    ggml_tensor * dst      = nullptr; // src[2] of the node, the cache view
+    ggml_tensor * data     = nullptr; // src[0], contiguous rows
+    ggml_tensor * idx      = nullptr; // src[1], I32 indices
+    bool          in_graph = false;
 };
 
 // per-call IO analysis: holds fresh ggml_tensor pointers and is rebuilt on
@@ -87,6 +91,13 @@ struct ggml_cannge_plan_io {
 
     bool   needs_staging = false; // some IO is not row-major dense
     size_t mem_estimate = 0;
+
+    // IFA decode: kv validity via actual_seq_lengths (int64 [1], GE input
+    // port bound to a backend-owned device buffer) instead of the BOOL
+    // atten_mask, which IFA ignores for s_q=1 (probe fa m12, note-42). The
+    // value is the visible-prefix length of fa_mask, refreshed per execute
+    ggml_tensor * fa_mask     = nullptr;
+    void *        fa_asl_dev  = nullptr; // owned by the plan, 8 bytes
 };
 
 // compiled plan: the cache unit of one cgraph signature, holds no ggml
@@ -110,6 +121,13 @@ struct ggml_cannge_plan {
     // dense copies of non-dense inputs (strided views), filled by a pre-execute
     // D2D copy on the compute stream; one slot per input, nullptr when direct
     std::vector<void *> input_staging;
+    // parallel to input_staging: set once an immutable WEIGHTS input has been
+    // staged, so later executes reuse the copy instead of re-uploading
+    std::vector<char>   input_staged_once;
+
+    // IFA actual_seq_lengths device buffer (8 bytes, int64 [1]); refreshed
+    // from the visible-prefix length of io.fa_mask on every execute
+    void * fa_asl_dev = nullptr;
 
     ~ggml_cannge_plan(); // frees all staging, defined where ACL is available
 };

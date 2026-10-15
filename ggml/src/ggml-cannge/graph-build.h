@@ -45,6 +45,9 @@ static inline bool ggml_cannge_ge_dtype(enum ggml_type type, ge::DataType & dt) 
         case GGML_TYPE_I32:
             dt = ge::DT_INT32;
             return true;
+        case GGML_TYPE_I64:
+            dt = ge::DT_INT64;
+            return true;
         default:
             return false;
     }

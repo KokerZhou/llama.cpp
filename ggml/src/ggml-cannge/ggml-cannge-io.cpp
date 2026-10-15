@@ -1,0 +1,226 @@
+/*
+ * Copyright (c) 2023-2026 The ggml authors
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
+ */
+
+// CANNGE backend IO copies: strided/dense staging transfers between ggml
+// buffers and GE input/output buffers (split out of ggml-cannge.cpp).
+
+#include "ggml-cannge-priv.h"
+
+#include "ggml-backend-impl.h"
+#include "ggml-impl.h"
+
+#include <algorithm>
+#include <cstring>
+
+ggml_cannge_dbg_timing g_dbg_time;
+
+ggml_cannge_dbg_timing::~ggml_cannge_dbg_timing() {
+    dump();
+}
+
+void ggml_cannge_dbg_timing::dump() {
+    if (!on || calls == 0) return;
+    fprintf(stderr, "[DBG-TIME] calls=%lld analyze=%.1f sig=%.1f find=%.1f bind=%.1f(stage=%.1f+sync=%.1f+obind=%.1f) exec=%.1f post=%.1f total=%.1f | cpy n=%lld sync=%.1f ms | staged=%.0f MB\n",
+            calls, analyze, sig, find, bind, stage, stage_sync, obind, exec, post, total, cpy_calls, cpy_sync,
+            stage_bytes / 1e6);
+    std::vector<std::pair<double, std::string>> top;
+    top.reserve(stage_names.size());
+    for (const auto & kv : stage_names) {
+        top.emplace_back(kv.second, kv.first);
+    }
+    std::sort(top.begin(), top.end(), [](const auto & a, const auto & b) { return a.first > b.first; });
+    for (size_t i = 0; i < top.size() && i < 8; i++) {
+        fprintf(stderr, "[DBG-TIME]   staged %-28s %.1f MB\n", top[i].second.c_str(), top[i].first / 1e6);
+    }
+    fprintf(stderr, "[DBG-TIME] evicts=%lld\n", evicts);
+}
+
+// element matrix; 16x16 tiles keep both sides cache-resident (the naive
+// element loop jumps columns*es per element and is the hot path of staged
+// transposed/permuted inputs)
+static void ggml_cannge_repack_2d(char * out, size_t o_r, size_t o_c, const char * in, size_t i_r, size_t i_c,
+                                  int64_t R, int64_t C, size_t es) {
+    const int64_t T = 16;
+    for (int64_t rr = 0; rr < R; rr += T) {
+        const int64_t rmax = std::min(R, rr + T);
+        for (int64_t cc = 0; cc < C; cc += T) {
+            const int64_t cmax = std::min(C, cc + T);
+            for (int64_t r = rr; r < rmax; r++) {
+                char * orow = out + (size_t) r * o_r;
+                const char * irow = in + (size_t) r * i_r;
+                for (int64_t c = cc; c < cmax; c++) {
+                    memcpy(orow + (size_t) c * o_c, irow + (size_t) c * i_c, es);
+                }
+            }
+        }
+    }
+}
+
+// copy between a strided ggml view layout and a compact dense buffer, via
+// ne1*ne2*ne3 element-granularity 2D copies (width = element size, height =
+// ne0, pitch = nb[0]); nb[0] can exceed the element size on permuted views
+void ggml_cannge_strided_copy(const ggml_tensor * t, void * dense, bool dense_to_strided, aclrtStream stream) {
+    const size_t es   = ggml_element_size(t);
+    const size_t slab = (size_t) t->ne[0] * es; // one dense (i1,i2,i3) slab
+    const int64_t n   = t->ne[1] * t->ne[2] * t->ne[3];
+    // a staged input may live in host memory (CPU fallback output): ACL has no
+    // auto-direction memcpy
+    const bool    host = t->buffer != nullptr && ggml_backend_buffer_is_host(t->buffer);
+    // SDMA strided copies need >=4B rows and 4B-aligned pitches (f16
+    // transposed views have 2B strides): bounce the whole footprint through
+    // host memory for those, one aligned H2D/D2H per direction
+    bool aligned_ok = es >= 4;
+    for (int i = 0; i < GGML_MAX_DIMS && aligned_ok; i++) {
+        aligned_ok = t->nb[i] % 4 == 0;
+    }
+    if (!aligned_ok) {
+        // clean 2D-repack family: dims 1..3 form a contiguous inner extent
+        // C (standard strides) and dim0 carries stride C*es, so the whole
+        // footprint is one packed [ne0 x C] matrix to repack tiled; anything
+        // else falls back to the element gather
+        const int64_t C_elems   = t->ne[1] * t->ne[2] * t->ne[3];
+        const bool   repack2d   = t->nb[1] == (size_t) es && t->nb[0] == (size_t) C_elems * es &&
+                                (t->ne[2] <= 1 || t->nb[2] == (size_t) t->ne[1] * es) &&
+                                (t->ne[3] <= 1 || t->nb[3] == (size_t) t->ne[1] * t->ne[2] * es);
+        if (getenv("GGML_CANNGE_DEBUG_COMPILE")) {
+            fprintf(stderr, "[DBG-COPY] bounce %s ne=%lld,%lld,%lld,%lld nb=%lld,%lld,%lld,%lld repack2d=%d\n",
+                    t->name, (long long) t->ne[0], (long long) t->ne[1], (long long) t->ne[2], (long long) t->ne[3],
+                    (long long) t->nb[0], (long long) t->nb[1], (long long) t->nb[2], (long long) t->nb[3],
+                    (int) repack2d);
+        }
+        int64_t off_last = 0;
+        for (int i = 0; i < GGML_MAX_DIMS; i++) {
+            off_last += (t->ne[i] - 1) * t->nb[i];
+        }
+        const size_t span = (size_t) off_last + es;
+        const size_t slab = (size_t) t->ne[0] * es;
+        // the blocking bounce copies below run on the default stream and do
+        // NOT wait for pending work on this stream: a dense_to_strided
+        // copy-back would read the staging buffer while the async GE execute
+        // is still writing it (observed as a previous layer's transpose bytes
+        // scattered into the next layer's cache view, GQA=all garbage).
+        // Drain first whenever the source side lives on device.
+        if (dense_to_strided || !host) {
+            ACL_CHECK(aclrtSynchronizeStream(stream));
+        }
+        std::vector<char> bounce(span);
+        if (dense_to_strided) {
+            std::vector<char> dense_host((size_t) n * slab);
+            ACL_CHECK(aclrtMemcpy(dense_host.data(), (size_t) n * slab, dense, (size_t) n * slab,
+                                  ACL_MEMCPY_DEVICE_TO_HOST));
+            if (repack2d && t->nb[0] != (size_t) es) {
+                // dense [ne0 x C] -> view layout (dim0 carries the C stride)
+                ggml_cannge_repack_2d(bounce.data(), (size_t) C_elems * es, es, dense_host.data(), es,
+                                      (size_t) t->ne[0] * es, t->ne[0], C_elems, es);
+            } else {
+                for (int64_t l = 0; l < n; l++) {
+                    const int64_t i1 = l % t->ne[1];
+                    const int64_t i2 = (l / t->ne[1]) % t->ne[2];
+                    const int64_t i3 = l / (t->ne[1] * t->ne[2]);
+                    char * dst = bounce.data() + i1 * t->nb[1] + i2 * t->nb[2] + i3 * t->nb[3];
+                    const char * src = dense_host.data() + (size_t) l * slab;
+                    // a view whose dim0 is not the memory-fastest dim (nb0 > es,
+                    // e.g. a transposed V cache view) needs element-wise scatter
+                    if (t->nb[0] == (size_t) es) {
+                        memcpy(dst, src, slab);
+                    } else {
+                        for (int64_t e = 0; e < t->ne[0]; e++) {
+                            memcpy(dst + (size_t) e * t->nb[0], src + (size_t) e * es, es);
+                        }
+                    }
+                }
+            }
+            ACL_CHECK(aclrtMemcpy(t->data, span, bounce.data(), span, ACL_MEMCPY_HOST_TO_DEVICE));
+        } else {
+            if (host) {
+                if (repack2d && t->nb[0] != (size_t) es) {
+                    ggml_cannge_repack_2d(bounce.data(), es, (size_t) t->ne[0] * es, (const char *) t->data,
+                                          (size_t) C_elems * es, es, t->ne[0], C_elems, es);
+                } else {
+                    for (int64_t l = 0; l < n; l++) {
+                        const int64_t i1 = l % t->ne[1];
+                        const int64_t i2 = (l / t->ne[1]) % t->ne[2];
+                        const int64_t i3 = l / (t->ne[1] * t->ne[2]);
+                        const char * src = (const char *) t->data + i1 * t->nb[1] + i2 * t->nb[2] + i3 * t->nb[3];
+                        char * dst = bounce.data() + (size_t) l * slab;
+                        if (t->nb[0] == (size_t) es) {
+                            memcpy(dst, src, slab);
+                        } else {
+                            for (int64_t e = 0; e < t->ne[0]; e++) {
+                                memcpy(dst + (size_t) e * es, src + (size_t) e * t->nb[0], es);
+                            }
+                        }
+                    }
+                }
+            } else {
+                // device-resident strided source: D2H the strided span into a
+                // host mirror, gather it into dense layout in bounce; the
+                // shared H2D below lands it in staging
+                std::vector<char> mirror(span);
+                ACL_CHECK(aclrtMemcpy(mirror.data(), span, t->data, span, ACL_MEMCPY_DEVICE_TO_HOST));
+                if (repack2d && t->nb[0] != (size_t) es) {
+                    ggml_cannge_repack_2d(bounce.data(), es, (size_t) t->ne[0] * es, mirror.data(),
+                                          (size_t) C_elems * es, es, t->ne[0], C_elems, es);
+                } else {
+                    for (int64_t l = 0; l < n; l++) {
+                        const int64_t i1 = l % t->ne[1];
+                        const int64_t i2 = (l / t->ne[1]) % t->ne[2];
+                        const int64_t i3 = l / (t->ne[1] * t->ne[2]);
+                        const char * src = mirror.data() + i1 * t->nb[1] + i2 * t->nb[2] + i3 * t->nb[3];
+                        char * dst = bounce.data() + (size_t) l * slab;
+                        if (t->nb[0] == (size_t) es) {
+                            memcpy(dst, src, slab);
+                        } else {
+                            for (int64_t e = 0; e < t->ne[0]; e++) {
+                                memcpy(dst + (size_t) e * es, src + (size_t) e * t->nb[0], es);
+                            }
+                        }
+                    }
+                }
+            }
+            ACL_CHECK(aclrtMemcpy(dense, (size_t) n * slab, bounce.data(), (size_t) n * slab,
+                                  ACL_MEMCPY_HOST_TO_DEVICE));
+        }
+        return;
+    }
+    const aclrtMemcpyKind kind =
+        dense_to_strided ? (host ? ACL_MEMCPY_DEVICE_TO_HOST : ACL_MEMCPY_DEVICE_TO_DEVICE)
+                         : (host ? ACL_MEMCPY_HOST_TO_DEVICE : ACL_MEMCPY_DEVICE_TO_DEVICE);
+    if (getenv("GGML_CANNGE_DEBUG_COMPILE")) {
+        fprintf(stderr, "[DBG-COPY] %s t->data=%p host=%d dir=%s ne=%lld,%lld,%lld,%lld nb0=%lld\n",
+                dense_to_strided ? "out" : "in", t->data, (int) host, dense_to_strided ? "D2H" : (host ? "H2D" : "D2D"),
+                (long long) t->ne[0], (long long) t->ne[1], (long long) t->ne[2], (long long) t->ne[3],
+                (long long) t->nb[0]);
+    }
+    for (int64_t l = 0; l < n; l++) {
+        const int64_t i1 = l % t->ne[1];
+        const int64_t i2 = (l / t->ne[1]) % t->ne[2];
+        const int64_t i3 = l / (t->ne[1] * t->ne[2]);
+        char *       view_row = (char *) t->data + i1 * t->nb[1] + i2 * t->nb[2] + i3 * t->nb[3];
+        char *       dense_row = (char *) dense + (size_t) l * slab;
+        const void * src    = dense_to_strided ? (const void *) dense_row : (const void *) view_row;
+        void *       dst    = dense_to_strided ? (void *) view_row : (void *) dense_row;
+        const size_t spitch = dense_to_strided ? es : (size_t) t->nb[0];
+        const size_t dpitch = dense_to_strided ? (size_t) t->nb[0] : es;
+        ACL_CHECK(aclrtMemcpy2dAsync(dst, dpitch, src, spitch, es, (size_t) t->ne[0], kind, stream));
+    }
+}
