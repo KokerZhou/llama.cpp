@@ -53,6 +53,14 @@
 
 **下一步（fix 方向）**：**绕开 Kcur/Vcur 端口 entirely**——cache-refresh 输出：SET_ROWS 改 in_graph（复用现成机制），build 里在 cache base holder {S,R} 上做 one-hot 选择产出"新鲜缓存"（M 行循环推广），节点本身作为输出端口（节点 ggml buffer = dst 视图 = cache），稠密回写后**host scatter 整体退役**（分裂配置收益也 +）。{512,1024} f16 的新端口形状若仍被 collapse 再按数量分片。
 
+## 3.6b 批T 撤回与翻案（重要）
+
+**"GE 散射族静默 no-op"（note-49 结论）正式撤回**。用修好的可信观测（plan cache 签名修复 + 无别名读数）重验：**TensorScatterUpdate 写 cache 逐字节精确**（setrows 探针 0.000；kvattn M=1/M=9 S=512 全过）。原始错误结论源于探针读法缺陷（视图别名 buffer + 读未输出端口的张量）。**用户批评正确：成熟产品先验应是"我的用法错了"**——同批还证实"合并图冻结"也是我自己的 plan cache bug（批S），"运行时 refresh collapse"从未被证实（机制是猜的）。
+
+SET_ROWS in_graph 路径已整体改用 TSU（替换 one-hot 选择 + BatchMatMulV3 矩阵形式，-48/+15 行），host scatter 保持退役。默认路径 =all 9.4 t/s 连贯。
+
+合并路径（CONT_NC）模型级仍乱码——散射既已清白，剩余嫌疑收敛到合并 fragment 的输入绑定 / holder 复用 / 每步重建图与 plan 的交互。下一步用可信 DUMP 在层 24 起点做干净二分。
+
 ## 3.7 批P cache-refresh（WIP，2d624231f）
 
 实现：merge 模式下 SET_ROWS 标记 in_graph，build 在 cache base {S,R} 上做 one-hot 行选择（M=1）/ m^T@rows BatchMatMulV3（M>1，K pad 8），节点自身作输出端口（buffer=cache），host scatter 退役；消费侧 splice 自动禁用（sr_for_base 跳过 in_graph）。**collapse 确证为按形状分组**：{512,1024} f16 refresh 端口逐层写回各异（不再塌）。
