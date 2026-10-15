@@ -41,6 +41,14 @@
 
 **批M 新线索（真 bug 方向）**：ngl=12 合并 decode 的 DBG-IO "out" 打印清单里 **Kcur/Vcur（1024,1）有 22 条，但跨片隐状态（2560,1）一条都没有**——合并 fragment 喂给 CPU lm head 的隐状态回写似乎没发生（下游读到陈旧 buffer → 乱码）。而 ngl=8 同结构却连贯。**下一步：对比 ngl=8（好）与 ngl=12（坏）的隐状态输出注册差异**（boundary-output 收集在两种切分下为何不同），这大概率就是根因。
 
+## 3.6 批N 猎杀记录（四个假说全部证伪，症状精确刻画）
+
+同边界对比（ngl=12 merged vs split，输入一致）发现决定性症状：**merged 第一步 logits 与 split 完全一致（c83f9a7a）但 Kcur/Vcur 的写回值不同（2.115 vs 1.427）**——即图内消费正确（kq 拼接用了正确的 Kcur → logits 对），而**同一 tensor 的输出端口写回 carry 了另一个值**。第二步起 KV cache 被污染 → 乱码。写回值逐步不同（非滞后）。
+
+证伪的四个 GE 假说（ggml_probe_alias 全部 PASS）：祖先链端口别名（小图+1200 节点长链）、32 个兄弟端口、双重用途（图内消费+终端输出）、强制私有物化（Add-zeros，可能被 GE 折叠）。DUMP 强制读死张量的同校验和 = ggml-alloc buffer 复用 artifact，非 GE 行为。
+
+**下一步（唯一 remaining 的大刀）**：在真实合并图上做层内二分——build 里加 debug 开关把 il>=K 的层换成 passthrough，定位第一个使 Kcur 写回偏离的层/算子；或对比 merged/split 的 Kcur 写回 staging 绑定索引。
+
 ## 4. 数字
 
 里程碑：0.6 → 1.7 → 3.8 → 6.0 → 6.9 → 10.4 → 10.8 → **10.6（交付默认态）**；=v 10.2；默认 2.4。合并若修好：4 片/token × 后端稳态 6.3ms，理论 15-25 t/s 量级。
