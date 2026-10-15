@@ -631,12 +631,21 @@ std::string ggml_cannge_plan_signature(ggml_cgraph * cgraph) {
     // share a plan, or the extra ports read whatever the cached graph's
     // staging left behind (observed as identical "frozen" values, note-52
     // batch S). Hash the flagged/boundary outputs' identities in id order.
-    append_u32((int32_t) ids.size());
+    // sort by the deterministic walk-assigned id: unordered_map iteration
+    // order follows pointer values, and llama rebuilds the decode graph per
+    // step with fresh addresses - pointer-order hashing changed the signature
+    // every step and recompiled all plans (4x tg regression)
+    std::vector<std::pair<uint32_t, const ggml_tensor *>> flagged;
     for (const auto & kv : ids) {
         if (kv.first->flags & GGML_TENSOR_FLAG_OUTPUT) {
-            append_u32(kv.second);
-            append_meta(kv.first);
+            flagged.emplace_back(kv.second, kv.first);
         }
+    }
+    std::sort(flagged.begin(), flagged.end(), [](const auto & a, const auto & b) { return a.first < b.first; });
+    append_u32((int32_t) flagged.size());
+    for (const auto & f : flagged) {
+        append_u32(f.first);
+        append_meta(f.second);
     }
 
     return sig;
