@@ -124,6 +124,14 @@ void ggml_cannge_strided_copy(const ggml_tensor * t, void * dense, bool dense_to
         }
         std::vector<char> bounce(span);
         if (dense_to_strided) {
+            // Preserve bytes between view elements when copying back the full span.
+            if (span > (size_t) n * slab) {
+                if (host) {
+                    memcpy(bounce.data(), t->data, span);
+                } else {
+                    ACL_CHECK(aclrtMemcpy(bounce.data(), span, t->data, span, ACL_MEMCPY_DEVICE_TO_HOST));
+                }
+            }
             std::vector<char> dense_host((size_t) n * slab);
             ACL_CHECK(aclrtMemcpy(dense_host.data(), (size_t) n * slab, dense, (size_t) n * slab,
                                   ACL_MEMCPY_DEVICE_TO_HOST));
@@ -149,7 +157,11 @@ void ggml_cannge_strided_copy(const ggml_tensor * t, void * dense, bool dense_to
                     }
                 }
             }
-            ACL_CHECK(aclrtMemcpy(t->data, span, bounce.data(), span, ACL_MEMCPY_HOST_TO_DEVICE));
+            if (host) {
+                memcpy(t->data, bounce.data(), span);
+            } else {
+                ACL_CHECK(aclrtMemcpy(t->data, span, bounce.data(), span, ACL_MEMCPY_HOST_TO_DEVICE));
+            }
         } else {
             if (host) {
                 if (repack2d && t->nb[0] != (size_t) es) {

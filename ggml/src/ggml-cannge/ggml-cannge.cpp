@@ -78,7 +78,7 @@ struct ggml_backend_cannge_context {
     aclrtStream stream = nullptr;
 
     std::unique_ptr<ggml_cannge_ge_context> ge;           // lazy, created on first plan compile
-    std::map<std::string, ggml_cannge_plan *> plans;      // signature -> plan, owned
+    std::map<std::string, std::unique_ptr<ggml_cannge_plan>> plans;
     uint64_t                                next_plan_seq = 0;
 
     ggml_backend_cannge_context(int32_t device) : device(device), name(GGML_CANNGE_NAME + std::to_string(device)) {
@@ -93,9 +93,7 @@ struct ggml_backend_cannge_context {
             ACL_CHECK(aclrtSynchronizeStream(stream));
         }
         ge.reset();
-        for (auto & kv : plans) {
-            delete kv.second;
-        }
+        plans.clear();
         if (stream != nullptr) {
             ACL_CHECK(aclrtDestroyStream(stream));
         }
@@ -119,7 +117,6 @@ struct ggml_backend_cannge_context {
             if (ge != nullptr && oldest->second->graph_id != 0) {
                 ge->remove(oldest->second->graph_id);
             }
-            delete oldest->second;
             plans.erase(oldest);
         }
     }
@@ -468,7 +465,7 @@ static enum ggml_status ggml_backend_cannge_graph_compute(ggml_backend_t backend
     ggml_cannge_plan * plan = nullptr;
     auto               it   = ctx->plans.find(signature);
     if (it != ctx->plans.end()) {
-        plan = it->second;
+        plan = it->second.get();
     }
 
     // compile -> load once per signature, bind + execute on every call
@@ -496,10 +493,11 @@ static enum ggml_status ggml_backend_cannge_graph_compute(ggml_backend_t backend
             GGML_LOG_ERROR("%s: graph build failed: %s\n", __func__, err.c_str());
             return GGML_STATUS_FAILED;
         }
+        std::unique_ptr<ge::Graph> graph_owner((ge::Graph *) graph);
         if (getenv("GGML_CANNGE_DUMP_GE")) {
             std::ofstream gs("/tmp/cannge_graph.txt", std::ios::app);
             gs << "===== graph_id " << fresh->graph_id << " sig " << std::hash<std::string>{}(signature) << " =====\n";
-            (*(ge::Graph *) graph).Dump(ge::Graph::DumpFormat::kTxt, gs);
+            graph_owner->Dump(ge::Graph::DumpFormat::kTxt, gs);
         }
         if (getenv("GGML_CANNGE_DEBUG_COMPILE")) {
             fprintf(stderr, "[DBG-COMPILE] ES build done nodes=%d, GE compile...\n", cgraph->n_nodes);
@@ -509,32 +507,30 @@ static enum ggml_status ggml_backend_cannge_graph_compute(ggml_backend_t backend
             ctx->ge.reset(ggml_cannge_ge_context::create(ctx->device, err));
             if (ctx->ge == nullptr) {
                 GGML_LOG_ERROR("%s: GE init failed: %s\n", __func__, err.c_str());
-                delete (ge::Graph *) graph;
                 return GGML_STATUS_FAILED;
             }
         }
 
         // the session owns an IR copy now, release the caller-side graph
-        const bool compiled = ctx->ge->add_and_compile(graph, fresh->graph_id, err);
-        delete (ge::Graph *) graph;
+        const bool compiled = ctx->ge->add_and_compile(graph_owner.get(), fresh->graph_id, err);
+        graph_owner.reset();
         if (!compiled) {
             GGML_LOG_ERROR("%s: compile failed: %s\n", __func__, err.c_str());
             fresh->state = ggml_cannge_plan::FAILED;
-            plan = fresh.release();
         } else {
             if (getenv("GGML_CANNGE_DEBUG_COMPILE")) {
                 fprintf(stderr, "[DBG-COMPILE] done nodes=%d\n", cgraph->n_nodes);
             }
             fresh->state = ggml_cannge_plan::COMPILED;
-            plan = fresh.release();
         }
 
         if (ctx->plans.size() >= GGML_CANNGE_MAX_PLANS) {
             ctx->evict_oldest_plan();
             if (g_dbg_time.on) g_dbg_time.evicts++;
         }
-        plan->seq = ctx->next_plan_seq++;
-        ctx->plans[signature] = plan;
+        fresh->seq = ctx->next_plan_seq++;
+        plan = fresh.get();
+        ctx->plans.emplace(signature, std::move(fresh));
     }
 
     const double dbg_t2 = g_dbg_time.on ? g_dbg_time.now() : 0;

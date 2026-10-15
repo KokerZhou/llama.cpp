@@ -84,7 +84,8 @@ static void ge_global_finalize() {
 
 struct ggml_cannge_ge_context::impl {
     int32_t            device       = -1;
-    ge::Session *      session      = nullptr;
+    bool               ge_initialized = false;
+    std::unique_ptr<ge::Session> session;
     uint32_t           next_graph_id = 1; // graph ids are user assigned, keep them unique
     std::set<uint32_t> graphs;            // added graph ids, for rollback and eviction
 };
@@ -97,27 +98,28 @@ ggml_cannge_ge_context * ggml_cannge_ge_context::create(int32_t device, std::str
     if (!ge_global_init(device, err)) {
         return nullptr;
     }
+    ctx->pimpl->ge_initialized = true;
 
     std::map<ge::AscendString, ge::AscendString> options = {
         { "ge.session_device_id", std::to_string(device).c_str() },
     };
     try {
-        ctx->pimpl->session = new ge::Session(options);
+        ctx->pimpl->session.reset(new ge::Session(options));
     } catch (const std::exception & e) {
         err = std::string("failed to create GE session: ") + e.what();
-        ge_global_finalize();
         return nullptr;
     }
     return ctx.release();
 }
 
 ggml_cannge_ge_context::~ggml_cannge_ge_context() {
-    // order matters: session is deleted before GEFinalize, see docs/cannge D6
-    if (pimpl && pimpl->session != nullptr) {
-        delete pimpl->session;
-        pimpl->session = nullptr;
+    if (pimpl) {
+        // Release the session before its reference to the GE runtime.
+        pimpl->session.reset();
+        if (pimpl->ge_initialized) {
+            ge_global_finalize();
+        }
     }
-    ge_global_finalize();
 }
 
 bool ggml_cannge_ge_context::add_and_compile(void * graph, uint32_t & graph_id, std::string & err) {
