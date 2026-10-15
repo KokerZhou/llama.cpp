@@ -702,19 +702,13 @@ static bool ggml_cannge_build_node(ggml_cannge_build_context & ctx, ggml_tensor 
                 // the matrix form: var = the cache holder, one row per index,
                 // updates cast like the retired host scatter.
                 {
-                    // scatter into a CAST COPY of the cache, never the
-                    // input-bound buffer: an in-place scatter on a zero-copy
-                    // input lets GE's planner alias the var workspace with
-                    // other tensors and clobber them (deterministic wrong
-                    // values from mid-fragment on, model-only - probes lack
-                    // the input+in-place-mutation pattern; note-52 batch W)
+                    // direct single-op scatter into the cache holder; the
+                    // in-place-on-input concern (batch W) died with the
+                    // is_weight root cause - direct form saves 2 ops/cache
                     auto upd0 = src0->type == src2->type ? upd : cannge_es::Cast(upd, (int64_t) dt);
                     upd0      = cannge_es::Reshape(upd0, std::vector<int64_t>{ src1->ne[0], src2->ne[0] });
                     auto idx2 = cannge_es::Reshape(idxh, std::vector<int64_t>{ src1->ne[0], 1 });
-                    auto var2 = cannge_es::Cast(es2, (int64_t) ge::DT_FLOAT);
-                    auto up2  = cannge_es::Cast(upd0, (int64_t) ge::DT_FLOAT);
-                    auto out  = cannge_es::TensorScatterUpdate(var2, idx2, up2);
-                    out       = cannge_es::Cast(out, (int64_t) dt);
+                    auto out  = cannge_es::TensorScatterUpdate(es2, idx2, upd0);
                     ctx.tensors[node] = out;
                     ggml_cannge_view_info vinfo;
                     if (ggml_cannge_resolve_view(src2, vinfo)) {
