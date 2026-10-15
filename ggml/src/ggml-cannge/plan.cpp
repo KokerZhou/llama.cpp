@@ -405,6 +405,14 @@ bool ggml_cannge_plan_analyze(ggml_cgraph * cgraph, ggml_cannge_plan_io & io, st
         const char * force_out = getenv("GGML_CANNGE_DUMP");
         if (n_consumers[node] == 0 || (node->flags & GGML_TENSOR_FLAG_OUTPUT) ||
             (force_out != nullptr && strstr(node->name, force_out) != nullptr)) {
+            // mark env-forced outputs with the flag so the plan signature
+            // sees them (the signature hashes flagged outputs; without this
+            // a DUMP-forced port reuses a plan compiled without it and reads
+            // stale staging, note-52 batch S)
+            if (force_out != nullptr && strstr(node->name, force_out) != nullptr &&
+                !(node->flags & GGML_TENSOR_FLAG_OUTPUT)) {
+                node->flags |= GGML_TENSOR_FLAG_OUTPUT;
+            }
             // a DENSE view that aliases an external input needs no GE output
             // port: consumers read the input buffer through the view strides,
             // the data is already there (the scheduler avoids splitting at
@@ -615,6 +623,20 @@ std::string ggml_cannge_plan_signature(ggml_cgraph * cgraph) {
             append_meta(src);
         }
         tensor_id(node);
+    }
+
+    // the output set is decided at analyze time (n_consumers, flags, env
+    // knobs like GGML_CANNGE_DUMP) and is NOT derivable from the cgraph: two
+    // computes with the same nodes but different forced outputs must not
+    // share a plan, or the extra ports read whatever the cached graph's
+    // staging left behind (observed as identical "frozen" values, note-52
+    // batch S). Hash the flagged/boundary outputs' identities in id order.
+    append_u32((int32_t) ids.size());
+    for (const auto & kv : ids) {
+        if (kv.first->flags & GGML_TENSOR_FLAG_OUTPUT) {
+            append_u32(kv.second);
+            append_meta(kv.first);
+        }
     }
 
     return sig;
