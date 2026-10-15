@@ -53,6 +53,12 @@
 
 **下一步（fix 方向）**：**绕开 Kcur/Vcur 端口 entirely**——cache-refresh 输出：SET_ROWS 改 in_graph（复用现成机制），build 里在 cache base holder {S,R} 上做 one-hot 选择产出"新鲜缓存"（M 行循环推广），节点本身作为输出端口（节点 ggml buffer = dst 视图 = cache），稠密回写后**host scatter 整体退役**（分裂配置收益也 +）。{512,1024} f16 的新端口形状若仍被 collapse 再按数量分片。
 
+## 3.7 批P cache-refresh（WIP，2d624231f）
+
+实现：merge 模式下 SET_ROWS 标记 in_graph，build 在 cache base {S,R} 上做 one-hot 行选择（M=1）/ m^T@rows BatchMatMulV3（M>1，K pad 8），节点自身作输出端口（buffer=cache），host scatter 退役；消费侧 splice 自动禁用（sr_for_base 跳过 in_graph）。**collapse 确证为按形状分组**：{512,1024} f16 refresh 端口逐层写回各异（不再塌）。
+
+WIP 两个待修：(1) 模型级 merged decode **第一步 logits 即偏离**（旧 splice 版第一步还一致）——探针全过（kvattn M=1/M=8、setrows 字节级）但模型不一致，差异在探针未覆盖的交互；(2) f32 全 cache 选择 ~0.5s/token（200MB/步流量）——需 f16 化或矩阵化。默认路径（无 CONT_NC）不受影响，10.6 t/s 连贯。
+
 ## 4. 数字
 
 里程碑：0.6 → 1.7 → 3.8 → 6.0 → 6.9 → 10.4 → 10.8 → **10.6（交付默认态）**；=v 10.2；默认 2.4。合并若修好：4 片/token × 后端稳态 6.3ms，理论 15-25 t/s 量级。
