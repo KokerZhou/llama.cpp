@@ -75,6 +75,12 @@ prefill TSU 输入对比：Vcur-25/26 视图 merged==split，**Vcur-27+ 全差**
 
 下一步候选：(1) 查 Vcur 跨片去向（M=2 图角色待查）；(2) 验证法——把跨片张量写回 staging 改为逐端口独立 device buffer 看偏离是否消失；(3) 或 prologue 与 wo+ffn 合并成一片（消跨片）。
 
+## 3.6e 批W 四处证伪 + 真实分歧的精确位置
+
+同形端口 collapse **证伪**（Vcur 各层写回各异）；输入绑定 **证伪**（bindcheck 145 个输入逐一验证全对——旧 manyinputs 探针因 eps 项太小对绑错不敏感，已补敏感版本）；in-place scatter **证伪**（cast-first 版未修好，探针精确保留为更安全形式）。
+
+真实分歧：merged prefill **Vcur-27 起值真错**（非端口/非绑定/非散射）——错在第一个循环 fragment（[CPU FA][CANNGE 33 节点] 模式的第一个）的计算本身，其输入经 staging 忠实拷贝了错值。四层 25/26 对、27+ 错。下一个二分对象：该 fragment 的每个输入（l_out-26 / kqv-from-CPU / 权重）逐一比对。
+
 ## 3.7 批P cache-refresh（WIP，2d624231f）
 
 实现：merge 模式下 SET_ROWS 标记 in_graph，build 在 cache base {S,R} 上做 one-hot 行选择（M=1）/ m^T@rows BatchMatMulV3（M>1，K pad 8），节点自身作输出端口（buffer=cache），host scatter 退役；消费侧 splice 自动禁用（sr_for_base 跳过 in_graph）。**collapse 确证为按形状分组**：{512,1024} f16 refresh 端口逐层写回各异（不再塌）。
