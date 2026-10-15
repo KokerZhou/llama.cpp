@@ -573,9 +573,14 @@ static enum ggml_status ggml_backend_cannge_graph_compute(ggml_backend_t backend
                 // big host-resident leaves that are not graph inputs are
                 // weights: immutable, so stage once per plan instead of
                 // re-uploading every execute. small tensors and the per-token
-                // inputs (flagged INPUT) are re-staged every execute
+                // inputs (flagged INPUT) are re-staged every execute. The host
+                // test is load-bearing: sched split copies are device-resident
+                // op-NONE leaves too, but the scheduler refreshes them before
+                // every compute - staging them once freezes every reuse of the
+                // plan on the first execution's bytes (CONT_NC pass-2 kqv)
                 const bool is_weight = !getenv("GGML_CANNGE_NO_WONCE") && t->op == GGML_OP_NONE &&
-                                       !(t->flags & GGML_TENSOR_FLAG_INPUT) &&
+                                       !(t->flags & GGML_TENSOR_FLAG_INPUT) && t->buffer != nullptr &&
+                                       ggml_backend_buffer_is_host(t->buffer) &&
                                        ggml_nbytes(t) > 64 * 1024;
                 if (getenv("GGML_CANNGE_DEBUG_COMPILE") && ggml_nbytes(t) > 1024 * 1024 &&
                     (t->op != GGML_OP_NONE || (t->flags & GGML_TENSOR_FLAG_INPUT))) {
@@ -603,6 +608,11 @@ static enum ggml_status ggml_backend_cannge_graph_compute(ggml_backend_t backend
             }            gert::Tensor tensor;
             if (!ggml_cannge_bind_tensor(t, tensor, dev_ptr)) {
                 return GGML_STATUS_FAILED;
+            }
+            if (getenv("GGML_CANNGE_DEBUG_IO")) {
+                fprintf(stderr, "[DBG-IO] bind in[%zu] %s t->data=%p dev=%p staged=%d base=%s+%zu\n", i, t->name,
+                        t->data, dev_ptr, (int) io.input_staged[i],
+                        io.input_base[i] ? io.input_base[i]->name : "-", io.input_base_offset[i]);
             }
             inputs.push_back(std::move(tensor));
         }
