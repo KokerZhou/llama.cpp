@@ -44,3 +44,11 @@ is_weight 增加 `buffer != nullptr && ggml_backend_buffer_is_host(buffer)`—�
 
 - 合并 decode 正确但 ~0.2 t/s：瓶颈 = f32 全 cache refresh 回写流量（批P 设计）。优化方向：回写改 in-place 通道 / f16 / 只写变化行（GE outputReuse 声明）。
 - 优化后合并路径（4 片/token）预期远超分裂路径 9.4——性能战场正式转到单图执行效率。
+
+## 批Y/Z：子 Agent 二轮调查 + 直连 TSU
+
+子 Agent（二）证伪"每 token 250 小图"前提：那些是**一次性启动成本**（server 探针 common_context_can_seq_rm 的 M=2 decode + prompt M=17 预填，M 不对齐 16 → matmul 落 CPU → 碎块；签名跨层共享所以编译 ~8s/块一次性）。真实 per-token：1432 大图设备侧执行 ~350ms（**~2400 GE op × 逐 op 地板**，有效带宽仅 23GB/s = 910B3 的 1.4%）+ bind ~30ms。
+
+结论：**算子流 GE 的逐 op 下发地板是合并路径的结构墙**——JI 的答案是手工融合核（整层一个 kernel），ES 算子流做不到。合并路径当前 2.7 t/s（正确），分裂路径 9.1 t/s 为交付配置。已落地：直连单 op TSU（省 144 op/token）、arena 打包（bind -25%）、DEBUG_SIG。
+
+遗留杠杆：启动探针 M 对齐（消除 250 个一次性小图编译，~省 30-50s 启动）、大图 op 数削减（每层 ~30 op → 理论上限 ~12 t/s）、lm head 尾片并入大图。
