@@ -22,6 +22,18 @@
 3. SET_ROWS 强制回写端口与拼接消费的同一 GE tensor 在大图中的相互作用。
 调试入口：`GGML_CANNGE_CONT_NC=1 GGML_CANNGE_DUMP=kq_soft_max-0 GGML_CANNGE_DEBUG_IO=1`（强制中间量回写对比 fallback）；`GGML_CANNGE_DUMP_GE=1` 后按 softmax 反查 kq-0 区段拓扑。
 
+## 3.5 批L 诊断进展（重要）
+
+**`-ngl N` 是把最后 N 层放到 CANNGE**（非前 N）：fragment 首节点 l_out-(36-N) 可证。
+
+**bisect（last-N 合并，同一边界）**：N=1/4/8 连贯；N=12 确定性乱码（两次逐字相同）；N=16 基本连贯；N=18/36 乱码。**非单调，排除单纯规模律**。
+
+**DUMP 强制回写暴露 GE 输出端口别名**：对祖先链上的 l_out-24/28/32 同时强制回写时，三者校验和完全相同（b78cc979）——GE 把线性依赖的多个输出端口绑到了同一内部 buffer，回写全读祖先值。这是代码注释里 ge.exec.outputReuseInputMemIndexes 的已知 GE 行为家族。
+
+**机制假说（合并图乱码的最大嫌疑）**：合并 fragment 的强制输出端口 = 每层 Kcur/Vcur 的 SET_ROWS data 端口（2×N 个）+ 边界隐状态。若 GE 对部分端口做同类别名 → Kcur/Vcur 快照读到错误 GE buffer → host scatter 把错值写进 KV cache → 第一步 decode 即乱码。N≤8 时端口数少可能未触发别名启发式，非单调性由此而来。
+
+**下一步验证**（探针先行）：kvattn 探针加祖先链双输出用例（out2=f(out1)，两者都 set_output）→ 若读回相同值 = GE 输出端口别名实锤。若实锤，workaround 方向：SET_ROWS data 不走高强制端口（改为在 build 里把 scatter 快照源换成 device 侧，或每层独立小图执行散射）。
+
 ## 4. 数字
 
 里程碑：0.6 → 1.7 → 3.8 → 6.0 → 6.9 → 10.4 → 10.8 → **10.6（交付默认态）**；=v 10.2；默认 2.4。合并若修好：4 片/token × 后端稳态 6.3ms，理论 15-25 t/s 量级。
