@@ -24,14 +24,115 @@
 // buffers and GE input/output buffers (split out of ggml-cannge.cpp).
 
 #include "ggml-cannge-priv.h"
+#include "plan.h"
 
 #include "ggml-backend-impl.h"
 #include "ggml-impl.h"
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
 
 ggml_cannge_dbg_timing g_dbg_time;
+
+bool ggml_cannge_reserve_input_arena(void *& device, void *& host, size_t & capacity, size_t size, aclrtStream stream) {
+    if (size <= capacity) {
+        return true;
+    }
+    if (aclrtSynchronizeStream(stream) != ACL_SUCCESS) {
+        return false;
+    }
+    void * new_device = nullptr;
+    void * new_host = nullptr;
+    if (aclrtMalloc(&new_device, size, ACL_MEM_MALLOC_HUGE_FIRST) != ACL_SUCCESS) {
+        return false;
+    }
+    if (aclrtMallocHost(&new_host, size) != ACL_SUCCESS) {
+        ACL_CHECK(aclrtFree(new_device));
+        return false;
+    }
+    if (device != nullptr) {
+        ACL_CHECK(aclrtFree(device));
+    }
+    if (host != nullptr) {
+        ACL_CHECK(aclrtFreeHost(host));
+    }
+    device = new_device;
+    host = new_host;
+    capacity = size;
+    return true;
+}
+
+bool ggml_cannge_set_rows(const ggml_cannge_set_rows_op & op, const std::vector<int64_t> & slots,
+                          const std::vector<char> & data, aclrtStream stream) {
+    const ggml_tensor * src = op.data;
+    const ggml_tensor * dst = op.dst;
+    const ggml_tensor * idx = op.idx;
+    if (src == nullptr || dst == nullptr || idx == nullptr) {
+        return false;
+    }
+    const size_t es_src = ggml_element_size(src);
+    const size_t es_dst = ggml_element_size(dst);
+    const bool host = dst->buffer != nullptr && ggml_backend_buffer_is_host(dst->buffer);
+    if ((src->type != GGML_TYPE_F16 && src->type != GGML_TYPE_F32) ||
+        (dst->type != GGML_TYPE_F16 && dst->type != GGML_TYPE_F32) ||
+        src->ne[0] != dst->ne[0] || src->ne[1] != idx->ne[0] ||
+        src->ne[2] != dst->ne[2] || src->ne[3] != dst->ne[3] ||
+        src->ne[0] <= 0 || src->ne[2] <= 0 || src->ne[3] <= 0 || dst->data == nullptr ||
+        idx->ne[0] <= 0 || idx->ne[1] <= 0 || idx->ne[2] <= 0 ||
+        slots.size() / (size_t) idx->ne[0] / (size_t) idx->ne[1] < (size_t) idx->ne[2] ||
+        data.size() < ggml_nbytes(src) || src->nb[0] != es_src || dst->nb[0] != es_dst) {
+        return false;
+    }
+    for (int64_t slot : slots) {
+        if (slot < 0 || slot >= dst->ne[1]) {
+            return false;
+        }
+    }
+
+    std::vector<char> converted;
+    if (es_src != es_dst) {
+        if (data.size() / es_src > std::numeric_limits<size_t>::max() / es_dst) {
+            return false;
+        }
+        converted.resize(data.size() / es_src * es_dst);
+    }
+    const size_t row_size = (size_t) src->ne[0] * es_dst;
+    bool copied = true;
+    for (int64_t i3 = 0; i3 < src->ne[3] && copied; i3++) {
+        for (int64_t i2 = 0; i2 < src->ne[2] && copied; i2++) {
+            for (int64_t i = 0; i < idx->ne[0]; i++) {
+                const size_t slot_id = (size_t) i + (size_t) (i2 % idx->ne[1]) * idx->ne[0] +
+                                      (size_t) (i3 % idx->ne[2]) * idx->ne[0] * idx->ne[1];
+                const size_t offset = i * src->nb[1] + i2 * src->nb[2] + i3 * src->nb[3];
+                const char * row = data.data() + offset;
+                char * dst_row = (char *) dst->data + slots[slot_id] * dst->nb[1] + i2 * dst->nb[2] + i3 * dst->nb[3];
+                if (es_src != es_dst) {
+                    char * cast_row = converted.data() + offset / es_src * es_dst;
+                    for (int64_t e = 0; e < src->ne[0]; e++) {
+                        if (src->type == GGML_TYPE_F32) {
+                            ((ggml_fp16_t *) cast_row)[e] = ggml_fp32_to_fp16(((const float *) row)[e]);
+                        } else {
+                            ((float *) cast_row)[e] = ggml_fp16_to_fp32(((const ggml_fp16_t *) row)[e]);
+                        }
+                    }
+                    row = cast_row;
+                }
+                if (host) {
+                    memcpy(dst_row, row, row_size);
+                } else if (aclrtMemcpyAsync(dst_row, row_size, row, row_size, ACL_MEMCPY_HOST_TO_DEVICE, stream) != ACL_SUCCESS) {
+                    copied = false;
+                    break;
+                }
+            }
+        }
+    }
+    // Both snapshots must stay alive until every queued host copy completes.
+    if (!host && aclrtSynchronizeStream(stream) != ACL_SUCCESS) {
+        return false;
+    }
+    return copied;
+}
 
 ggml_cannge_dbg_timing::~ggml_cannge_dbg_timing() {
     dump();

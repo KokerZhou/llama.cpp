@@ -39,6 +39,7 @@
 #include <fstream>
 #include <algorithm>
 #include <map>
+#include <limits>
 
 
 
@@ -578,25 +579,22 @@ static enum ggml_status ggml_backend_cannge_graph_compute(ggml_backend_t backend
             const bool wonce = !getenv("GGML_CANNGE_NO_WONCE") && t->op == GGML_OP_NONE &&
                                !(t->flags & GGML_TENSOR_FLAG_INPUT) && host && ggml_nbytes(t) > 64 * 1024;
             if (host && ggml_is_contiguous(t) && !wonce) {
+                const size_t bytes = ggml_nbytes(t);
+                const size_t max_size = std::numeric_limits<size_t>::max();
+                if (bytes > max_size - 255 || ((bytes + 255) & ~(size_t) 255) > max_size - arena_need) {
+                    GGML_LOG_ERROR("%s: input arena size overflow\n", __func__);
+                    return GGML_STATUS_FAILED;
+                }
                 in_arena_on[i]  = 1;
                 in_arena_off[i] = arena_need;
-                arena_need += (ggml_nbytes(t) + 255) & ~(size_t) 255;
+                arena_need += (bytes + 255) & ~(size_t) 255;
             }
         }
         if (arena_need > 0) {
-            if (plan->in_arena_size < arena_need) {
-                if (plan->in_arena != nullptr) {
-                    ACL_CHECK(aclrtFree(plan->in_arena));
-                }
-                if (plan->in_arena_host != nullptr) {
-                    ACL_CHECK(aclrtFreeHost(plan->in_arena_host));
-                }
-                if (aclrtMalloc(&plan->in_arena, arena_need, ACL_MEM_MALLOC_HUGE_FIRST) != ACL_SUCCESS ||
-                    aclrtMallocHost(&plan->in_arena_host, arena_need) != ACL_SUCCESS) {
-                    GGML_LOG_ERROR("%s: failed to allocate input arena (%zu bytes)\n", __func__, arena_need);
-                    return GGML_STATUS_FAILED;
-                }
-                plan->in_arena_size = arena_need;
+            if (!ggml_cannge_reserve_input_arena(plan->in_arena, plan->in_arena_host, plan->in_arena_size,
+                                                arena_need, ctx->stream)) {
+                GGML_LOG_ERROR("%s: failed to reserve input arena (%zu bytes)\n", __func__, arena_need);
+                return GGML_STATUS_FAILED;
             }
             for (size_t i = 0; i < io.inputs.size(); i++) {
                 if (in_arena_on[i]) {
@@ -1035,79 +1033,11 @@ static enum ggml_status ggml_backend_cannge_graph_compute(ggml_backend_t backend
             }
         }
 
-        // KV cache row scatter (SET_ROWS): dst[slot, i2, i3] = data[i, i2, i3]
-        // with slot = idx[i, i2%ne12, i3%ne13], ggml-cpu ops.cpp set_rows_impl.
-        // slots and row bytes come from the host snapshots taken around GE
-        // execute: the ggml buffers may have been reused by later tensors in
-        // this graph before this post-execute scatter runs (see snapshot note)
         for (size_t sri = 0; sri < io.set_rows.size(); sri++) {
             const ggml_cannge_set_rows_op & sr = io.set_rows[sri];
-            if (sr.in_graph) {
-                continue; // written by an in-graph GE ScatterUpdate
-            }
-            const int64_t nidx    = sr.idx->ne[0];
-            const int64_t * slots = sr_slots[sri].data();
-            const bool    dst_host  = sr.dst->buffer  != nullptr && ggml_backend_buffer_is_host(sr.dst->buffer);
-            const size_t  es_d      = ggml_element_size(sr.data);
-            const size_t  es_t      = ggml_element_size(sr.dst);
-            // host-side cast scratch for the f32 rope output -> f16 cache case;
-            // the snapshot is already host-resident, no per-row staging needed
-            std::vector<char> cast_buf;
-            if (es_d != es_t) {
-                cast_buf.resize((size_t) sr.data->ne[0] * es_t);
-            }
-            for (int64_t i3 = 0; i3 < sr.data->ne[3]; i3++) {
-                for (int64_t i2 = 0; i2 < sr.data->ne[2]; i2++) {
-                    const int64_t i11 = i2 % sr.idx->ne[1];
-                    const int64_t i12 = i3 % sr.idx->ne[2];
-                    for (int64_t i = 0; i < nidx; i++) {
-                        const int64_t sl =
-                            slots[(size_t) i + (size_t) i11 * nidx + (size_t) i12 * nidx * sr.idx->ne[1]];
-                        const char * src = sr_data[sri].data() + i * sr.data->nb[1] + i2 * sr.data->nb[2] +
-                                           i3 * sr.data->nb[3];
-                        if (getenv("GGML_CANNGE_DEBUG_IO") && i == 0 && i2 == 0 && i3 == 0) {
-                            fprintf(stderr,
-                                    "[DBG-CPY] set_rows %s(data=%p dst=%p dsth=%d sl0=%lld idx=%s(%p,raw snap=%lld nb=%zu)\n",
-                                    sr.data->name, sr.data->data, sr.dst->data, (int) dst_host,
-                                    (long long) slots[0], sr.idx->name, sr.idx->data,
-                                    (long long) slots[0], ggml_nbytes(sr.idx));
-                        }
-                        char * dst_row = (char *) sr.dst->data + (size_t) sl * sr.dst->nb[1] + i2 * sr.dst->nb[2] +
-                                         i3 * sr.dst->nb[3];
-                        const size_t row_dst = (size_t) sr.data->ne[0] * es_t;
-                        if (es_d == es_t) {
-                            if (getenv("GGML_CANNGE_DEBUG_COMPILE")) {
-                                fprintf(stderr, "[DBG-SR] row %s->%s src=%p dst=%p dsth=%d\n",
-                                        sr.data->name, sr.dst->name, src, dst_row, (int) dst_host);
-                            }
-                            if (dst_host) {
-                                memcpy(dst_row, src, row_dst);
-                            } else {
-                                ACL_CHECK(aclrtMemcpyAsync(dst_row, row_dst, src, row_dst,
-                                                           ACL_MEMCPY_HOST_TO_DEVICE, ctx->stream));
-                            }
-                        } else {
-                            // cast in host memory, then copy to the destination side
-                            if (sr.data->type == GGML_TYPE_F32 && sr.dst->type == GGML_TYPE_F16) {
-                                for (int64_t e = 0; e < sr.data->ne[0]; e++) {
-                                    ((ggml_fp16_t *) cast_buf.data())[e] =
-                                        ggml_fp32_to_fp16(((const float *) src)[e]);
-                                }
-                            } else {
-                                for (int64_t e = 0; e < sr.data->ne[0]; e++) {
-                                    ((float *) cast_buf.data())[e] =
-                                        ggml_fp16_to_fp32(((const ggml_fp16_t *) src)[e]);
-                                }
-                            }
-                            if (dst_host) {
-                                memcpy(dst_row, cast_buf.data(), row_dst);
-                            } else {
-                                ACL_CHECK(aclrtMemcpyAsync(dst_row, row_dst, cast_buf.data(), row_dst,
-                                                           ACL_MEMCPY_HOST_TO_DEVICE, ctx->stream));
-                            }
-                        }
-                    }
-                }
+            if (!sr.in_graph && !ggml_cannge_set_rows(sr, sr_slots[sri], sr_data[sri], ctx->stream)) {
+                GGML_LOG_ERROR("%s: SET_ROWS copy failed for %s\n", __func__, sr.data->name);
+                return GGML_STATUS_FAILED;
             }
         }
         if (getenv("GGML_CANNGE_DEBUG_IO")) {
