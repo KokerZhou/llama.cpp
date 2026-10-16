@@ -557,8 +557,15 @@ static enum ggml_status ggml_backend_cannge_graph_compute(ggml_backend_t backend
         if (plan->input_staging.size() < io.inputs.size()) {
             plan->input_staging.resize(io.inputs.size(), nullptr);
         }
-        if (plan->input_staged_once.size() < io.inputs.size()) {
-            plan->input_staged_once.resize(io.inputs.size(), 0);
+        if (plan->input_staged_sources.size() < io.inputs.size()) {
+            plan->input_staged_sources.resize(io.inputs.size(), nullptr);
+        }
+        std::vector<const void *> staging_sources(io.inputs.size());
+        for (size_t i = 0; i < io.inputs.size(); i++) {
+            staging_sources[i] = ggml_cannge_staging_source(io.inputs[i]);
+            if (staging_sources[i] != plan->input_staged_sources[i]) {
+                plan->input_staged_sources[i] = nullptr;
+            }
         }
         bool staged_any      = false;
         bool staged_host_any = false; // dense host src: deferred pageable H2D needs the drain
@@ -572,13 +579,11 @@ static enum ggml_status ggml_backend_cannge_graph_compute(ggml_backend_t backend
         size_t              arena_need = 0;
         for (size_t i = 0; i < io.inputs.size(); i++) {
             ggml_tensor * t = io.inputs[i];
-            if (!io.input_staged[i] || io.input_base[i] || plan->input_staged_once[i]) {
+            if (!io.input_staged[i] || io.input_base[i] || plan->input_staged_sources[i]) {
                 continue;
             }
             const bool host = t->buffer != nullptr && ggml_backend_buffer_is_host(t->buffer);
-            const bool wonce = !getenv("GGML_CANNGE_NO_WONCE") && t->op == GGML_OP_NONE &&
-                               !(t->flags & GGML_TENSOR_FLAG_INPUT) && host && ggml_nbytes(t) > 64 * 1024;
-            if (host && ggml_is_contiguous(t) && !wonce) {
+            if (host && ggml_is_contiguous(t) && staging_sources[i] == nullptr) {
                 const size_t bytes = ggml_nbytes(t);
                 const size_t max_size = std::numeric_limits<size_t>::max();
                 if (bytes > max_size - 255 || ((bytes + 255) & ~(size_t) 255) > max_size - arena_need) {
@@ -625,28 +630,16 @@ static enum ggml_status ggml_backend_cannge_graph_compute(ggml_backend_t backend
                                    ggml_nbytes(t));
                     return GGML_STATUS_FAILED;
                 }
-                // big host-resident leaves that are not graph inputs are
-                // weights: immutable, so stage once per plan instead of
-                // re-uploading every execute. small tensors and the per-token
-                // inputs (flagged INPUT) are re-staged every execute. The host
-                // test is load-bearing: sched split copies are device-resident
-                // op-NONE leaves too, but the scheduler refreshes them before
-                // every compute - staging them once freezes every reuse of the
-                // plan on the first execution's bytes (CONT_NC pass-2 kqv)
-                const bool is_weight = !getenv("GGML_CANNGE_NO_WONCE") && t->op == GGML_OP_NONE &&
-                                       !(t->flags & GGML_TENSOR_FLAG_INPUT) && t->buffer != nullptr &&
-                                       ggml_backend_buffer_is_host(t->buffer) &&
-                                       ggml_nbytes(t) > 64 * 1024;
                 if (getenv("GGML_CANNGE_DEBUG_COMPILE") && ggml_nbytes(t) > 1024 * 1024 &&
                     (t->op != GGML_OP_NONE || (t->flags & GGML_TENSOR_FLAG_INPUT))) {
                     fprintf(stderr, "[DBG-WONCE] %s op=%d flags=%x not-a-weight-leaf\n", t->name, (int) t->op,
                             (unsigned) t->flags);
                 }
-                if (!is_weight || !plan->input_staged_once[i]) {
+                if (plan->input_staged_sources[i] == nullptr) {
                     ggml_cannge_strided_copy(t, plan->input_staging[i], false, ctx->stream);
                     dev_ptr            = plan->input_staging[i];
                     staged_any         = true;
-                    plan->input_staged_once[i] = is_weight ? 1 : 0;
+                    plan->input_staged_sources[i] = staging_sources[i];
                     // only a DENSE host source goes through the deferred
                     // pageable H2D; the bounce paths copy with blocking calls
                     if (t->buffer != nullptr && ggml_backend_buffer_is_host(t->buffer) &&
@@ -660,7 +653,8 @@ static enum ggml_status ggml_backend_cannge_graph_compute(ggml_backend_t backend
                     g_dbg_time.stage_bytes += ggml_nbytes(t);
                     g_dbg_time.stage_names[t->name] += (double) ggml_nbytes(t);
                 }
-            }            gert::Tensor tensor;
+            }
+            gert::Tensor tensor;
             if (!ggml_cannge_bind_tensor(t, tensor, dev_ptr)) {
                 return GGML_STATUS_FAILED;
             }

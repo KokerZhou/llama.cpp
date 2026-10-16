@@ -46,6 +46,7 @@ struct ggml_cannge_dbg_timing {
 extern ggml_cannge_dbg_timing g_dbg_time;
 
 // ggml-cannge-io.cpp
+const void * ggml_cannge_staging_source(const ggml_tensor * tensor);
 void ggml_cannge_strided_copy(const ggml_tensor * t, void * dense, bool dense_to_strided, aclrtStream stream);
 bool ggml_cannge_reserve_input_arena(void *& device, void *& host, size_t & capacity, size_t size, aclrtStream stream);
 struct ggml_cannge_set_rows_op;

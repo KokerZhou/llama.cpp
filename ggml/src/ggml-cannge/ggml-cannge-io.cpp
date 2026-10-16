@@ -35,6 +35,17 @@
 
 ggml_cannge_dbg_timing g_dbg_time;
 
+const void * ggml_cannge_staging_source(const ggml_tensor * tensor) {
+    if (getenv("GGML_CANNGE_NO_WONCE") != nullptr || tensor->op != GGML_OP_NONE ||
+        (tensor->flags & GGML_TENSOR_FLAG_INPUT) || tensor->buffer == nullptr ||
+        !ggml_backend_buffer_is_host(tensor->buffer) ||
+        ggml_backend_buffer_get_usage(tensor->buffer) != GGML_BACKEND_BUFFER_USAGE_WEIGHTS ||
+        ggml_nbytes(tensor) <= 64 * 1024) {
+        return nullptr;
+    }
+    return tensor->data;
+}
+
 bool ggml_cannge_reserve_input_arena(void *& device, void *& host, size_t & capacity, size_t size, aclrtStream stream) {
     if (size <= capacity) {
         return true;

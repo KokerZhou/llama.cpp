@@ -127,9 +127,8 @@ struct ggml_cannge_plan {
     void *  in_arena       = nullptr;
     void *  in_arena_host  = nullptr;
     size_t  in_arena_size  = 0;
-    // parallel to input_staging: set once an immutable WEIGHTS input has been
-    // staged, so later executes reuse the copy instead of re-uploading
-    std::vector<char>   input_staged_once;
+    // Source addresses of staged weight inputs; null means the copy is not reusable.
+    std::vector<const void *> input_staged_sources;
 
     // IFA actual_seq_lengths device buffer (8 bytes, int64 [1]); refreshed
     // from the visible-prefix length of io.fa_mask on every execute
