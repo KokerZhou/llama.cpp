@@ -456,7 +456,7 @@ static enum ggml_status ggml_backend_cannge_graph_compute(ggml_backend_t backend
     }
 
     const double dbg_t1 = g_dbg_time.on ? g_dbg_time.now() : 0;
-    const std::string signature = ggml_cannge_plan_signature(cgraph);
+    const std::string signature = ggml_cannge_plan_signature(cgraph, io);
     if (getenv("GGML_CANNGE_DEBUG_SIG")) {
         fprintf(stderr, "[DBG-SIG] nodes=%d first=%s sig=%llu\n", cgraph->n_nodes, cgraph->nodes[0]->name,
                 (unsigned long long) std::hash<std::string>{}(signature));

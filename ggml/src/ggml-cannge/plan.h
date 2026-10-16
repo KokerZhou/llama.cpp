@@ -147,4 +147,4 @@ ggml_tensor * ggml_cannge_resolve_view_base(ggml_tensor * node, const std::set<g
 
 bool ggml_cannge_plan_analyze(ggml_cgraph * cgraph, ggml_cannge_plan_io & io, std::string & err);
 
-std::string ggml_cannge_plan_signature(ggml_cgraph * cgraph);
+std::string ggml_cannge_plan_signature(ggml_cgraph * cgraph, const ggml_cannge_plan_io & io);

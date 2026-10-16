@@ -28,15 +28,33 @@
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include <set>
 #include <unordered_map>
 
 // walk the view_src chain down to the root tensor
 bool ggml_cannge_resolve_view(ggml_tensor * t, ggml_cannge_view_info & info) {
-    info.offset = 0;
+    info = {};
+    if (t == nullptr) {
+        return false;
+    }
+
+    // Detect cycles without allocating on the per-compute analysis path.
+    ggml_tensor * slow = t;
+    ggml_tensor * fast = t;
+    while (fast != nullptr && fast->view_src != nullptr) {
+        slow = slow->view_src;
+        fast = fast->view_src->view_src;
+        if (slow == fast) {
+            return false;
+        }
+    }
 
     ggml_tensor * base = t;
     while (ggml_is_view(base)) {
+        if (base->view_offs > std::numeric_limits<size_t>::max() - info.offset) {
+            return false;
+        }
         info.offset += base->view_offs;
         base = base->view_src;
         if (base == nullptr) {
@@ -405,14 +423,6 @@ bool ggml_cannge_plan_analyze(ggml_cgraph * cgraph, ggml_cannge_plan_io & io, st
         const char * force_out = getenv("GGML_CANNGE_DUMP");
         if (n_consumers[node] == 0 || (node->flags & GGML_TENSOR_FLAG_OUTPUT) ||
             (force_out != nullptr && strstr(node->name, force_out) != nullptr)) {
-            // mark env-forced outputs with the flag so the plan signature
-            // sees them (the signature hashes flagged outputs; without this
-            // a DUMP-forced port reuses a plan compiled without it and reads
-            // stale staging, note-52 batch S)
-            if (force_out != nullptr && strstr(node->name, force_out) != nullptr &&
-                !(node->flags & GGML_TENSOR_FLAG_OUTPUT)) {
-                node->flags |= GGML_TENSOR_FLAG_OUTPUT;
-            }
             // a DENSE view that aliases an external input needs no GE output
             // port: consumers read the input buffer through the view strides,
             // the data is already there (the scheduler avoids splitting at
@@ -571,7 +581,7 @@ bool ggml_cannge_plan_analyze(ggml_cgraph * cgraph, ggml_cannge_plan_io & io, st
     return true;
 }
 
-std::string ggml_cannge_plan_signature(ggml_cgraph * cgraph) {
+std::string ggml_cannge_plan_signature(ggml_cgraph * cgraph, const ggml_cannge_plan_io & io) {
     std::string sig;
 
     // tensor ids by first appearance: srcs of a node before the node itself
@@ -591,6 +601,7 @@ std::string ggml_cannge_plan_signature(ggml_cgraph * cgraph) {
     auto append_u64 = [&sig](uint64_t v) { sig.append((const char *) &v, sizeof(v)); };
     auto append_meta = [&sig, append_i32, append_i64, append_u64](const ggml_tensor * t) {
         append_i32((int32_t) t->type);
+        append_u64(t->view_offs);
         for (int i = 0; i < GGML_MAX_DIMS; i++) {
             append_i64(t->ne[i]);
         }
@@ -619,33 +630,47 @@ std::string ggml_cannge_plan_signature(ggml_cgraph * cgraph) {
             if (src == nullptr) {
                 continue;
             }
+            append_i32(j);
             append_u32(tensor_id(src));
             append_meta(src);
         }
-        tensor_id(node);
+        append_u32(tensor_id(node));
     }
 
-    // the output set is decided at analyze time (n_consumers, flags, env
-    // knobs like GGML_CANNGE_DUMP) and is NOT derivable from the cgraph: two
-    // computes with the same nodes but different forced outputs must not
-    // share a plan, or the extra ports read whatever the cached graph's
-    // staging left behind (observed as identical "frozen" values, note-52
-    // batch S). Hash the flagged/boundary outputs' identities in id order.
-    // sort by the deterministic walk-assigned id: unordered_map iteration
-    // order follows pointer values, and llama rebuilds the decode graph per
-    // step with fresh addresses - pointer-order hashing changed the signature
-    // every step and recompiled all plans (4x tg regression)
-    std::vector<std::pair<uint32_t, const ggml_tensor *>> flagged;
-    for (const auto & kv : ids) {
-        if (kv.first->flags & GGML_TENSOR_FLAG_OUTPUT) {
-            flagged.emplace_back(kv.second, kv.first);
+    // Port order is part of the compiled graph's binding contract.
+    // Walk-assigned ids keep the key stable when tensor addresses change.
+    auto append_ports = [&](const std::vector<ggml_tensor *> & ports) {
+        append_u64(ports.size());
+        for (ggml_tensor * t : ports) {
+            append_u32(tensor_id(t));
+            append_meta(t);
         }
+    };
+    append_ports(io.inputs);
+    append_ports(io.output_tensors);
+    append_u64(io.set_rows.size());
+    for (const ggml_cannge_set_rows_op & sr : io.set_rows) {
+        append_u32(tensor_id(sr.dst));
+        append_u32(tensor_id(sr.data));
+        append_u32(tensor_id(sr.idx));
+        append_i32(sr.in_graph);
     }
-    std::sort(flagged.begin(), flagged.end(), [](const auto & a, const auto & b) { return a.first < b.first; });
-    append_u32((int32_t) flagged.size());
-    for (const auto & f : flagged) {
-        append_u32(f.first);
-        append_meta(f.second);
+
+    // These options change the compiled graph even when its ports stay the same.
+    const char * const graph_options[] = {
+        "GGML_CANNGE_GEMV16", "GGML_CANNGE_GQA", "GGML_CANNGE_NO_SPLICE",
+        "GGML_CANNGE_CONT_NC", "GGML_CANNGE_NO_CONT_NC", "GGML_CANNGE_SR_ADD0",
+        "GGML_CANNGE_FA_LAYOUT", "GGML_CANNGE_FA_INPERM", "GGML_CANNGE_FA_OUTPERM",
+        "GGML_CANNGE_FA_PRE", "GGML_CANNGE_FA_NEXT", "GGML_CANNGE_FA_IFA_ALL", "GGML_CANNGE_FA_ASL",
+    };
+    for (const char * option : graph_options) {
+        const char * value = getenv(option);
+        append_i32(value != nullptr);
+        if (value != nullptr) {
+            const size_t size = strlen(value);
+            append_u64(size);
+            sig.append(value, size);
+        }
     }
 
     return sig;
