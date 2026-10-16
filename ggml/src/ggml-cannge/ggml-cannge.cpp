@@ -283,9 +283,9 @@ static bool ggml_backend_cannge_cpy_tensor_async(ggml_backend_t backend_src, ggm
     // host bounce, one H2D; the scheduler's split copies are dense so GE can
     // bind them directly without per-use staging
     if (!ggml_are_same_layout(src, dst)) {
-        ggml_cannge_strided_copy(src, dst->data, false, ctx->stream);
-        ACL_CHECK(aclrtSynchronizeStream(ctx->stream));
-        return true;
+        const bool copied = ggml_cannge_strided_copy(src, dst->data, false, ctx->stream);
+        const bool drained = ACL_CHECK(aclrtSynchronizeStream(ctx->stream));
+        return copied && drained;
     }
     // cross-backend copies can involve host buffers (CPU fallback outputs),
     // ACL has no auto-direction memcpy: pick the kind from the buffer types
@@ -295,13 +295,16 @@ static bool ggml_backend_cannge_cpy_tensor_async(ggml_backend_t backend_src, ggm
     } else if (ggml_backend_buffer_is_host(dst->buffer)) {
         kind = ACL_MEMCPY_DEVICE_TO_HOST;
     }
-    ACL_CHECK(aclrtMemcpyAsync(dst->data, ggml_nbytes(dst), src->data, ggml_nbytes(src), kind, ctx->stream));
+    const bool copied = ACL_CHECK(aclrtMemcpyAsync(dst->data, ggml_nbytes(dst), src->data, ggml_nbytes(src), kind, ctx->stream));
     // synchronize both directions: the peer backend's threads proceed without
     // any stream ordering - on H2D the host src can be reused/overwritten by
     // later host work before a deferred pageable copy reads it (same pinned-
     // page lesson as set_tensor, F15b); on D2H the CPU consumer reads dst
     // immediately. a sync here is the only correct interlock.
-    ACL_CHECK(aclrtSynchronizeStream(ctx->stream));
+    const bool drained = ACL_CHECK(aclrtSynchronizeStream(ctx->stream));
+    if (!copied || !drained) {
+        return false;
+    }
     if (getenv("GGML_CANNGE_DEBUG_IO")) {
         const size_t n = std::min(ggml_nbytes(src), (size_t) 4096);
         std::vector<char> sbuf(n), dbuf(n);
@@ -567,8 +570,14 @@ static enum ggml_status ggml_backend_cannge_graph_compute(ggml_backend_t backend
                 plan->input_staged_sources[i] = nullptr;
             }
         }
+        const auto transfer_failed = [&]() {
+            std::fill(plan->input_staged_sources.begin(), plan->input_staged_sources.end(), nullptr);
+            // Drain earlier copies before temporary host buffers leave scope.
+            ACL_CHECK(aclrtSynchronizeStream(ctx->stream));
+            return GGML_STATUS_FAILED;
+        };
         bool staged_any      = false;
-        bool staged_host_any = false; // dense host src: deferred pageable H2D needs the drain
+        bool staged_host_any = false; // drain host transfers and validate reusable staging
 
         // pack the per-step dense host staged inputs into one pinned arena +
         // one async H2D (merged graphs stage ~150 tiny inputs per execute;
@@ -607,8 +616,10 @@ static enum ggml_status ggml_backend_cannge_graph_compute(ggml_backend_t backend
                            ggml_nbytes(io.inputs[i]));
                 }
             }
-            ACL_CHECK(aclrtMemcpyAsync(plan->in_arena, arena_need, plan->in_arena_host, arena_need,
-                                       ACL_MEMCPY_HOST_TO_DEVICE, ctx->stream));
+            if (!ACL_CHECK(aclrtMemcpyAsync(plan->in_arena, arena_need, plan->in_arena_host, arena_need,
+                                           ACL_MEMCPY_HOST_TO_DEVICE, ctx->stream))) {
+                return transfer_failed();
+            }
             staged_any      = true;
             staged_host_any = true;
         }
@@ -636,12 +647,15 @@ static enum ggml_status ggml_backend_cannge_graph_compute(ggml_backend_t backend
                             (unsigned) t->flags);
                 }
                 if (plan->input_staged_sources[i] == nullptr) {
-                    ggml_cannge_strided_copy(t, plan->input_staging[i], false, ctx->stream);
+                    if (!ggml_cannge_strided_copy(t, plan->input_staging[i], false, ctx->stream)) {
+                        return transfer_failed();
+                    }
                     dev_ptr            = plan->input_staging[i];
                     staged_any         = true;
-                    plan->input_staged_sources[i] = staging_sources[i];
-                    // only a DENSE host source goes through the deferred
-                    // pageable H2D; the bounce paths copy with blocking calls
+                    if (staging_sources[i] != nullptr) {
+                        staged_host_any = true;
+                    }
+                    // Dense host sources must remain valid until the copy completes.
                     if (t->buffer != nullptr && ggml_backend_buffer_is_host(t->buffer) &&
                         ggml_is_contiguous(t)) {
                         staged_host_any = true;
@@ -722,10 +736,13 @@ static enum ggml_status ggml_backend_cannge_graph_compute(ggml_backend_t backend
         if (staged_host_any) {
             // a dense staged host source may be reused by the CPU allocator as
             // soon as this call returns; the deferred pageable H2D could read
-            // overwritten bytes (F15b pinned-page lesson). the blocking bounce
-            // paths need no drain
-            ACL_CHECK(aclrtSynchronizeStream(ctx->stream));
+            // overwritten bytes (F15b pinned-page lesson). Also validate new
+            // reusable staging before publishing its source identity.
+            if (!ACL_CHECK(aclrtSynchronizeStream(ctx->stream))) {
+                return transfer_failed();
+            }
         }
+        plan->input_staged_sources = staging_sources;
         const double dbg_t2b = g_dbg_time.on ? g_dbg_time.now() : 0;
         // output ports whose device range overlaps an input range (aliased
         // views, e.g. PERMUTE of an input) must not be bound in place: GE
@@ -962,12 +979,16 @@ static enum ggml_status ggml_backend_cannge_graph_compute(ggml_backend_t backend
                         (void *) plan->staging[sp.first], ggml_nbytes(t));
             }
             if (sp.second) {
-                ggml_cannge_strided_copy(t, plan->staging[sp.first], true, ctx->stream);
+                if (!ggml_cannge_strided_copy(t, plan->staging[sp.first], true, ctx->stream)) {
+                    return transfer_failed();
+                }
             } else {
                 const bool host = t->buffer != nullptr && ggml_backend_buffer_is_host(t->buffer);
                 const aclrtMemcpyKind kind = host ? ACL_MEMCPY_DEVICE_TO_HOST : ACL_MEMCPY_DEVICE_TO_DEVICE;
-                ACL_CHECK(aclrtMemcpyAsync(t->data, ggml_nbytes(t), plan->staging[sp.first], ggml_nbytes(t),
-                                           kind, ctx->stream));
+                if (!ACL_CHECK(aclrtMemcpyAsync(t->data, ggml_nbytes(t), plan->staging[sp.first], ggml_nbytes(t),
+                                               kind, ctx->stream))) {
+                    return transfer_failed();
+                }
             }
         }
 

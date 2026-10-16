@@ -19,13 +19,8 @@
 // plan cache bound; HBM budget based eviction per D6 comes later
 #define GGML_CANNGE_MAX_PLANS 256
 
-#define ACL_CHECK(expr)                                                                                                          \
-    do {                                                                                                                         \
-        aclError err = (expr);                                                                                                   \
-        if (err != ACL_SUCCESS) {                                                                                                \
-            GGML_LOG_ERROR("%s: ACL error %d (%s) at %s:%d\n", __func__, err, aclGetRecentErrMsg(), __FILE__, __LINE__);         \
-        }                                                                                                                        \
-    } while (0)
+bool ggml_cannge_check(aclError error, const char * function, const char * file, int line);
+#define ACL_CHECK(expr) ggml_cannge_check((expr), __func__, __FILE__, __LINE__)
 
 // debug timing accumulators (GGML_CANNGE_DEBUG_TIMING): ms per phase, printed
 // every 1000 graph_compute calls; locates where token time goes (note-37)
@@ -47,7 +42,7 @@ extern ggml_cannge_dbg_timing g_dbg_time;
 
 // ggml-cannge-io.cpp
 const void * ggml_cannge_staging_source(const ggml_tensor * tensor);
-void ggml_cannge_strided_copy(const ggml_tensor * t, void * dense, bool dense_to_strided, aclrtStream stream);
+bool ggml_cannge_strided_copy(const ggml_tensor * t, void * dense, bool dense_to_strided, aclrtStream stream);
 bool ggml_cannge_reserve_input_arena(void *& device, void *& host, size_t & capacity, size_t size, aclrtStream stream);
 struct ggml_cannge_set_rows_op;
 bool ggml_cannge_set_rows(const ggml_cannge_set_rows_op & op, const std::vector<int64_t> & slots,
