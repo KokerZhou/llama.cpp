@@ -514,43 +514,12 @@ static bool ggml_cannge_build_node(ggml_cannge_build_context & ctx, ggml_tensor 
             return true;
         }
 
-        case GGML_OP_PERMUTE: {
-            if (!ctx.get(src0, es0)) {
-                return false;
-            }
-            // ggml op_params is a forward src->dst map (out.ne[p[i]] sits at src
-            // dim i), ES Permute order is dst->src, so invert first; both use
-            // ggml axis numbering, then flip to GE order. The permute rank must
-            // follow the INPUT holder: ggml_n_dims(node) can exceed it when the
-            // permute shuffles trailing size-1 dims (decode q view [128,32,1,1]
-            // permuted to [128,1,32,1] reports nd 3 over a rank-2 holder)
-            const int nd = ggml_n_dims(src0);
-            int32_t   inv_p[GGML_MAX_DIMS] = { 0, 1, 2, 3 };
-            for (int i = 0; i < nd; i++) {
-                inv_p[node->op_params[i]] = i;
-            }
-            std::vector<int64_t> order(nd);
-            for (int k = 0; k < nd; k++) {
-                order[k] = nd - 1 - inv_p[nd - 1 - k];
-            }
-            ctx.tensors[node] = cannge_es::Permute(es0, order);
-            return true;
-        }
-
+        case GGML_OP_PERMUTE:
         case GGML_OP_TRANSPOSE: {
-            if (!ctx.get(src0, es0)) {
+            if (!ctx.get(src0, es0) || !ggml_cannge_build_relabel(node, es0, ctx.err)) {
                 return false;
             }
-            // swap the innermost two ggml dims = outermost two GE dims; rank
-            // follows the input holder like PERMUTE above
-            const int nd = ggml_n_dims(src0);
-            std::vector<int64_t> perm(nd);
-            for (int i = 0; i < nd; i++) {
-                perm[i] = i;
-            }
-            perm[nd - 1] = nd - 2;
-            perm[nd - 2] = nd - 1;
-            ctx.tensors[node] = cannge_es::Transpose(es0, perm);
+            ctx.tensors[node] = es0;
             return true;
         }
 

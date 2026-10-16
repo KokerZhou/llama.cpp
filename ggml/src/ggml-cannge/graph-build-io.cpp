@@ -3,6 +3,8 @@
 
 #include "graph-build-priv.h"
 
+#include <utility>
+
 bool ggml_cannge_build_relabel(ggml_tensor * step, cannge_es::EsTensorHolder & h, std::string & err) {
     if (getenv("GGML_CANNGE_DEBUG_BUILD")) {
         fprintf(stderr,
@@ -17,42 +19,37 @@ bool ggml_cannge_build_relabel(ggml_tensor * step, cannge_es::EsTensorHolder & h
                 ggml_cannge_ge_shape(step).size());
     }
     switch (step->op) {
-        case GGML_OP_PERMUTE: {
-            // ggml flattens view chains, so the holder may carry the BASE
-            // shape while the permute expects its (virtual) src0 shape: relabel
-            // to src0's GE shape first (element count already matched by the
-            // caller's prefix slice), then apply the dst->src inverted order
-            if (step->src[0] == nullptr) {
-                err = "permute step without src0 " + std::string(step->name);
-                return false;
-            }
-            h           = cannge_es::Reshape(h, ggml_cannge_ge_shape(step->src[0]));
-            const int nd = ggml_n_dims(step->src[0]);
-            int32_t   inv_p[GGML_MAX_DIMS] = { 0, 1, 2, 3 };
-            for (int i = 0; i < nd; i++) {
-                inv_p[step->op_params[i]] = i;
-            }
-            std::vector<int64_t> order(nd);
-            for (int k = 0; k < nd; k++) {
-                order[k] = nd - 1 - inv_p[nd - 1 - k];
-            }
-            h = cannge_es::Permute(h, order);
-            return true;
-        }
+        case GGML_OP_PERMUTE:
         case GGML_OP_TRANSPOSE: {
             if (step->src[0] == nullptr) {
-                err = "transpose step without src0 " + std::string(step->name);
+                err = "axis transform without src0 " + std::string(step->name);
                 return false;
             }
-            h            = cannge_es::Reshape(h, ggml_cannge_ge_shape(step->src[0]));
-            const int nd = ggml_n_dims(step->src[0]);
-            std::vector<int64_t> perm(nd);
-            for (int i = 0; i < nd; i++) {
-                perm[i] = i;
+            const ggml_tensor * src = step->src[0];
+            std::vector<int64_t> shape(GGML_MAX_DIMS);
+            std::vector<int64_t> order(GGML_MAX_DIMS);
+            for (int i = 0; i < GGML_MAX_DIMS; i++) {
+                shape[GGML_MAX_DIMS - 1 - i] = src->ne[i];
+                order[i] = i;
             }
-            perm[nd - 1] = nd - 2;
-            perm[nd - 2] = nd - 1;
-            h = cannge_es::Transpose(h, perm);
+            if (step->op == GGML_OP_PERMUTE) {
+                bool seen[GGML_MAX_DIMS] = {};
+                for (int i = 0; i < GGML_MAX_DIMS; i++) {
+                    const int axis = step->op_params[i];
+                    if (axis < 0 || axis >= GGML_MAX_DIMS || seen[axis]) {
+                        err = "invalid permutation " + std::string(step->name);
+                        return false;
+                    }
+                    seen[axis] = true;
+                    order[GGML_MAX_DIMS - 1 - axis] = GGML_MAX_DIMS - 1 - i;
+                }
+            } else {
+                std::swap(order[GGML_MAX_DIMS - 1], order[GGML_MAX_DIMS - 2]);
+            }
+            // Retain singleton axes while permuting, then restore the output rank.
+            h = cannge_es::Reshape(h, shape);
+            h = cannge_es::Permute(h, order);
+            h = cannge_es::Reshape(h, ggml_cannge_ge_shape(step));
             return true;
         }
         case GGML_OP_VIEW:
