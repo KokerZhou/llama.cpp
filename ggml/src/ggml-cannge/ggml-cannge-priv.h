@@ -14,13 +14,12 @@
 #include <string>
 #include <vector>
 
-#define GGML_CANNGE_NAME "CANNGE"
+constexpr const char * GGML_CANNGE_NAME = "CANNGE";
 
 // plan cache bound; HBM budget based eviction per D6 comes later
-#define GGML_CANNGE_MAX_PLANS 256
+constexpr size_t GGML_CANNGE_MAX_PLANS = 256;
 
-bool ggml_cannge_check(aclError error, const char * function, const char * file, int line);
-#define ACL_CHECK(expr) ggml_cannge_check((expr), __func__, __FILE__, __LINE__)
+bool ggml_cannge_check(aclError error, const char * operation, const char * function);
 
 // debug timing accumulators (GGML_CANNGE_DEBUG_TIMING): ms per phase, printed
 // every 1000 graph_compute calls; locates where token time goes (note-37)

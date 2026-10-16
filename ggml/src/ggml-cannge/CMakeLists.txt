@@ -79,11 +79,14 @@ if (CANN_INSTALL_DIR)
 
     ggml_add_backend_library(ggml-cannge
                              ggml-cannge.cpp
+                             ggml-cannge-runtime.cpp
                              ggml-cannge-io.cpp
                              ggml-cannge-gates.cpp
                              plan.cpp
                              ge.cpp
                              graph-build.cpp
+                             graph-build-matmul.cpp
+                             graph-build-attention.cpp
                              graph-build-io.cpp
                             )
 

@@ -35,9 +35,9 @@
 
 ggml_cannge_dbg_timing g_dbg_time;
 
-bool ggml_cannge_check(aclError error, const char * function, const char * file, int line) {
+bool ggml_cannge_check(aclError error, const char * operation, const char * function) {
     if (error != ACL_SUCCESS) {
-        GGML_LOG_ERROR("%s: ACL error %d (%s) at %s:%d\n", function, error, aclGetRecentErrMsg(), file, line);
+        GGML_LOG_ERROR("%s: %s failed with ACL error %d: %s\n", function, operation, error, aclGetRecentErrMsg());
         return false;
     }
     return true;
@@ -67,14 +67,14 @@ bool ggml_cannge_reserve_input_arena(void *& device, void *& host, size_t & capa
         return false;
     }
     if (aclrtMallocHost(&new_host, size) != ACL_SUCCESS) {
-        ACL_CHECK(aclrtFree(new_device));
+        ggml_cannge_check(aclrtFree(new_device), "aclrtFree", __func__);
         return false;
     }
     if (device != nullptr) {
-        ACL_CHECK(aclrtFree(device));
+        ggml_cannge_check(aclrtFree(device), "aclrtFree", __func__);
     }
     if (host != nullptr) {
-        ACL_CHECK(aclrtFreeHost(host));
+        ggml_cannge_check(aclrtFreeHost(host), "aclrtFreeHost", __func__);
     }
     device = new_device;
     host = new_host;
@@ -240,7 +240,7 @@ bool ggml_cannge_strided_copy(const ggml_tensor * t, void * dense, bool dense_to
         // scattered into the next layer's cache view, GQA=all garbage).
         // Drain first whenever the source side lives on device.
         if (dense_to_strided || !host) {
-            if (!ACL_CHECK(aclrtSynchronizeStream(stream))) {
+            if (!ggml_cannge_check(aclrtSynchronizeStream(stream), "aclrtSynchronizeStream", __func__)) {
                 return false;
             }
         }
@@ -251,14 +251,14 @@ bool ggml_cannge_strided_copy(const ggml_tensor * t, void * dense, bool dense_to
                 if (host) {
                     memcpy(bounce.data(), t->data, span);
                 } else {
-                    if (!ACL_CHECK(aclrtMemcpy(bounce.data(), span, t->data, span, ACL_MEMCPY_DEVICE_TO_HOST))) {
+                    if (!ggml_cannge_check(aclrtMemcpy(bounce.data(), span, t->data, span, ACL_MEMCPY_DEVICE_TO_HOST), "aclrtMemcpy", __func__)) {
                         return false;
                     }
                 }
             }
             std::vector<char> dense_host((size_t) n * slab);
-            if (!ACL_CHECK(aclrtMemcpy(dense_host.data(), (size_t) n * slab, dense, (size_t) n * slab,
-                                      ACL_MEMCPY_DEVICE_TO_HOST))) {
+            if (!ggml_cannge_check(aclrtMemcpy(dense_host.data(), (size_t) n * slab, dense, (size_t) n * slab,
+                                      ACL_MEMCPY_DEVICE_TO_HOST), "aclrtMemcpy", __func__)) {
                 return false;
             }
             if (repack2d && t->nb[0] != (size_t) es) {
@@ -286,7 +286,7 @@ bool ggml_cannge_strided_copy(const ggml_tensor * t, void * dense, bool dense_to
             if (host) {
                 memcpy(t->data, bounce.data(), span);
             } else {
-                if (!ACL_CHECK(aclrtMemcpy(t->data, span, bounce.data(), span, ACL_MEMCPY_HOST_TO_DEVICE))) {
+                if (!ggml_cannge_check(aclrtMemcpy(t->data, span, bounce.data(), span, ACL_MEMCPY_HOST_TO_DEVICE), "aclrtMemcpy", __func__)) {
                     return false;
                 }
             }
@@ -316,7 +316,7 @@ bool ggml_cannge_strided_copy(const ggml_tensor * t, void * dense, bool dense_to
                 // host mirror, gather it into dense layout in bounce; the
                 // shared H2D below lands it in staging
                 std::vector<char> mirror(span);
-                if (!ACL_CHECK(aclrtMemcpy(mirror.data(), span, t->data, span, ACL_MEMCPY_DEVICE_TO_HOST))) {
+                if (!ggml_cannge_check(aclrtMemcpy(mirror.data(), span, t->data, span, ACL_MEMCPY_DEVICE_TO_HOST), "aclrtMemcpy", __func__)) {
                     return false;
                 }
                 if (repack2d && t->nb[0] != (size_t) es) {
@@ -339,8 +339,8 @@ bool ggml_cannge_strided_copy(const ggml_tensor * t, void * dense, bool dense_to
                     }
                 }
             }
-            if (!ACL_CHECK(aclrtMemcpy(dense, (size_t) n * slab, bounce.data(), (size_t) n * slab,
-                                      ACL_MEMCPY_HOST_TO_DEVICE))) {
+            if (!ggml_cannge_check(aclrtMemcpy(dense, (size_t) n * slab, bounce.data(), (size_t) n * slab,
+                                      ACL_MEMCPY_HOST_TO_DEVICE), "aclrtMemcpy", __func__)) {
                 return false;
             }
         }
@@ -365,7 +365,7 @@ bool ggml_cannge_strided_copy(const ggml_tensor * t, void * dense, bool dense_to
         void *       dst    = dense_to_strided ? (void *) view_row : (void *) dense_row;
         const size_t spitch = dense_to_strided ? es : (size_t) t->nb[0];
         const size_t dpitch = dense_to_strided ? (size_t) t->nb[0] : es;
-        if (!ACL_CHECK(aclrtMemcpy2dAsync(dst, dpitch, src, spitch, es, (size_t) t->ne[0], kind, stream))) {
+        if (!ggml_cannge_check(aclrtMemcpy2dAsync(dst, dpitch, src, spitch, es, (size_t) t->ne[0], kind, stream), "aclrtMemcpy2dAsync", __func__)) {
             return false;
         }
     }

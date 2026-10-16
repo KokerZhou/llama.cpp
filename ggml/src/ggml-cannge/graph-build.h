@@ -27,6 +27,7 @@
 #include <graph/types.h>
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 struct ggml_cannge_plan;

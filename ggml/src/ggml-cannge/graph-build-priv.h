@@ -120,4 +120,5 @@ struct ggml_cannge_build_context {
 
 bool ggml_cannge_build_inputs(ggml_cannge_build_context & ctx);
 bool ggml_cannge_build_view(ggml_cannge_build_context & ctx, ggml_tensor * node);
-
+bool ggml_cannge_build_matmul(ggml_cannge_build_context & ctx, ggml_tensor * node);
+bool ggml_cannge_build_attention(ggml_cannge_build_context & ctx, ggml_tensor * node);
