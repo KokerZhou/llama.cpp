@@ -138,15 +138,15 @@ bool ggml_cannge_ge_context::add_and_compile(void * graph, uint32_t & graph_id, 
         return false;
     }
 
+    pimpl->graphs.insert(graph_id);
     ret = pimpl->session->CompileGraph(graph_id);
     if (ret != ge::SUCCESS) {
-        // roll the graph back so no half-added graph stays in the session
-        pimpl->session->RemoveGraph(graph_id);
         err = "CompileGraph failed: " + ge::GEGetErrorMsg();
+        // Keep failed removals tracked so eviction can retry them.
+        remove(graph_id);
         return false;
     }
 
-    pimpl->graphs.insert(graph_id);
     return true;
 }
 
