@@ -22,7 +22,7 @@
 
 #pragma once
 
-#include "ggml-cannge-priv.h"
+#include "common.h"
 #include "ge.h"
 #include "plan.h"
 
@@ -48,4 +48,3 @@ struct ggml_backend_cannge_context {
 };
 
 void ggml_backend_cannge_set_device(int32_t device);
-enum ggml_status ggml_backend_cannge_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph);

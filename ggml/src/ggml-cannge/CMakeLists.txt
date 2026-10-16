@@ -79,15 +79,29 @@ if (CANN_INSTALL_DIR)
 
     ggml_add_backend_library(ggml-cannge
                              ggml-cannge.cpp
-                             ggml-cannge-runtime.cpp
-                             ggml-cannge-io.cpp
-                             ggml-cannge-gates.cpp
+                             common.cpp
+                             ops.cpp
+                             graph.cpp
+                             cpy.cpp
+                             supports.cpp
                              plan.cpp
                              ge.cpp
                              graph-build.cpp
-                             graph-build-matmul.cpp
-                             graph-build-attention.cpp
+                             mul-mat.cpp
+                             fattn.cpp
                              graph-build-io.cpp
+                             common.h
+                             ggml-cannge-impl.h
+                             graph.h
+                             cpy.h
+                             supports.h
+                             ops.h
+                             mul-mat.h
+                             fattn.h
+                             plan.h
+                             ge.h
+                             graph-build.h
+                             graph-build-priv.h
                             )
 
     target_include_directories(ggml-cannge PRIVATE ${CANN_INCLUDE_DIRS})

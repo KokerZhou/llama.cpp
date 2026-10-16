@@ -20,8 +20,9 @@
  * IN THE SOFTWARE.
  */
 
+#include "supports.h"
 #include "plan.h"
-#include "ggml-cannge-priv.h"
+#include "common.h"
 
 #include "ggml-backend.h"
 #include "ggml-impl.h"

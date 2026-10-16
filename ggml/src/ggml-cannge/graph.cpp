@@ -20,7 +20,10 @@
  * IN THE SOFTWARE.
  */
 
-#include "ggml-cannge-runtime.h"
+#include "graph.h"
+#include "cpy.h"
+#include "supports.h"
+#include "ggml-cannge-impl.h"
 #include "ggml-cannge.h"
 #include "ggml-impl.h"
 #include "graph-build.h"

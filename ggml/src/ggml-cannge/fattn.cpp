@@ -24,6 +24,7 @@
 // axis order convention (docs/cannge note-7): ggml ne[0] is innermost, GE
 // shapes are outermost-first, all conversions go through graph-build.h helpers
 
+#include "fattn.h"
 #include "graph-build.h"
 
 #include "ggml-impl.h"

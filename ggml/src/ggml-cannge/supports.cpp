@@ -24,7 +24,8 @@
 // (split out of ggml-cannge.cpp). Each accepted op must have a matching build
 // case in graph-build.cpp.
 
-#include "ggml-cannge-priv.h"
+#include "supports.h"
+#include "common.h"
 
 #include "ggml-backend-impl.h"
 #include "ggml-impl.h"

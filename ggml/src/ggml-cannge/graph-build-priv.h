@@ -1,5 +1,4 @@
-// CANNGE graph build internals shared between graph-build.cpp (op
-// dispatch) and graph-build-io.cpp (inputs/views/relabels).
+// CANNGE ES context shared by graph assembly, operation mappings and IO builders.
 
 #pragma once
 
@@ -120,5 +119,3 @@ struct ggml_cannge_build_context {
 
 bool ggml_cannge_build_inputs(ggml_cannge_build_context & ctx);
 bool ggml_cannge_build_view(ggml_cannge_build_context & ctx, ggml_tensor * node);
-bool ggml_cannge_build_matmul(ggml_cannge_build_context & ctx, ggml_tensor * node);
-bool ggml_cannge_build_attention(ggml_cannge_build_context & ctx, ggml_tensor * node);

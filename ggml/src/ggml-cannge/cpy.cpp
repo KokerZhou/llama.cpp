@@ -23,7 +23,8 @@
 // CANNGE backend IO copies: strided/dense staging transfers between ggml
 // buffers and GE input/output buffers (split out of ggml-cannge.cpp).
 
-#include "ggml-cannge-priv.h"
+#include "cpy.h"
+#include "common.h"
 #include "plan.h"
 
 #include "ggml-backend-impl.h"
@@ -32,16 +33,6 @@
 #include <algorithm>
 #include <cstring>
 #include <limits>
-
-ggml_cannge_dbg_timing g_dbg_time;
-
-bool ggml_cannge_check(aclError error, const char * operation, const char * function) {
-    if (error != ACL_SUCCESS) {
-        GGML_LOG_ERROR("%s: %s failed with ACL error %d: %s\n", function, operation, error, aclGetRecentErrMsg());
-        return false;
-    }
-    return true;
-}
 
 const void * ggml_cannge_staging_source(const ggml_tensor * tensor) {
     if (getenv("GGML_CANNGE_NO_WONCE") != nullptr || tensor->op != GGML_OP_NONE ||
@@ -151,27 +142,6 @@ bool ggml_cannge_set_rows(const ggml_cannge_set_rows_op & op, const std::vector<
         return false;
     }
     return copied;
-}
-
-ggml_cannge_dbg_timing::~ggml_cannge_dbg_timing() {
-    dump();
-}
-
-void ggml_cannge_dbg_timing::dump() {
-    if (!on || calls == 0) return;
-    fprintf(stderr, "[DBG-TIME] calls=%lld analyze=%.1f sig=%.1f find=%.1f bind=%.1f(stage=%.1f+sync=%.1f+obind=%.1f) exec=%.1f post=%.1f total=%.1f | cpy n=%lld sync=%.1f ms | staged=%.0f MB\n",
-            calls, analyze, sig, find, bind, stage, stage_sync, obind, exec, post, total, cpy_calls, cpy_sync,
-            stage_bytes / 1e6);
-    std::vector<std::pair<double, std::string>> top;
-    top.reserve(stage_names.size());
-    for (const auto & kv : stage_names) {
-        top.emplace_back(kv.second, kv.first);
-    }
-    std::sort(top.begin(), top.end(), [](const auto & a, const auto & b) { return a.first > b.first; });
-    for (size_t i = 0; i < top.size() && i < 8; i++) {
-        fprintf(stderr, "[DBG-TIME]   staged %-28s %.1f MB\n", top[i].second.c_str(), top[i].first / 1e6);
-    }
-    fprintf(stderr, "[DBG-TIME] evicts=%lld\n", evicts);
 }
 
 // element matrix; 16x16 tiles keep both sides cache-resident (the naive

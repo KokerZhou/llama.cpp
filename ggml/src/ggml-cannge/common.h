@@ -1,6 +1,4 @@
-// CANNGE backend private cross-TU declarations (not installed).
-// Split out of ggml-cannge.cpp so the backend interface, the op gates and
-// the IO copies compile as separate units (note-48 batch G).
+// Shared CANNGE types and diagnostics. Backend context is in ggml-cannge-impl.h.
 
 #pragma once
 
@@ -39,19 +37,7 @@ struct ggml_cannge_dbg_timing {
 
 extern ggml_cannge_dbg_timing g_dbg_time;
 
-// ggml-cannge-io.cpp
-const void * ggml_cannge_staging_source(const ggml_tensor * tensor);
-bool ggml_cannge_strided_copy(const ggml_tensor * t, void * dense, bool dense_to_strided, aclrtStream stream);
-bool ggml_cannge_reserve_input_arena(void *& device, void *& host, size_t & capacity, size_t size, aclrtStream stream);
-struct ggml_cannge_set_rows_op;
-bool ggml_cannge_set_rows(const ggml_cannge_set_rows_op & op, const std::vector<int64_t> & slots,
-                          const std::vector<char> & data, aclrtStream stream);
-
-// ggml-cannge-gates.cpp
-bool ggml_cannge_float_dtype(enum ggml_type type);
 bool ggml_backend_cannge_graph_env_enabled();
-bool ggml_backend_cannge_device_supports_buft(ggml_backend_dev_t dev, ggml_backend_buffer_type_t buft);
-bool ggml_backend_cannge_device_supports_op(ggml_backend_dev_t dev, const ggml_tensor * op);
 
 // ggml-cannge.cpp
 const char * ggml_backend_cannge_buffer_type_name(ggml_backend_buffer_type_t buft);

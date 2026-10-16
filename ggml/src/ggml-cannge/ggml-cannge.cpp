@@ -24,12 +24,15 @@
 // Independent from ggml-cann: owns its ACL device discovery, buffers,
 // transfers, streams, GE sessions and graph plans.
 
+#include "graph.h"
+#include "cpy.h"
+#include "supports.h"
 #include "ggml-cannge.h"
-#include "ggml-cannge-priv.h"
+#include "common.h"
 #include "ggml-backend-impl.h"
 #include "ggml-impl.h"
 
-#include "ggml-cannge-runtime.h"
+#include "ggml-cannge-impl.h"
 
 #include <acl/acl.h>
 

@@ -1,21 +1,27 @@
 # CANNGE backend internals
 
+The layout follows the sibling CPU/CUDA backends: a backend entry point, shared infrastructure, a private context header, and operation source/header pairs. CANNGE additionally needs a compiled-graph execution layer because GE owns scheduling inside each graph.
+
 ## Responsibilities
 
 | File | Responsibility |
 | --- | --- |
 | `ggml-cannge.cpp` | Backend registration, device discovery, buffers, transfers and events |
-| `ggml-cannge-runtime.cpp` | Context and plan lifetime, graph compilation, binding, execution and output completion |
-| `ggml-cannge-gates.cpp` | Scheduling policy and per-operation capability predicates |
-| `ggml-cannge-io.cpp` | Layout conversion, staging allocation and row scatter |
+| `graph.cpp` | Context and plan lifetime, graph compilation, binding, execution and output completion |
+| `supports.cpp` | Scheduling policy and per-operation capability predicates |
+| `cpy.cpp` | Layout conversion, staging allocation and row scatter |
 | `plan.cpp` | Per-call IO analysis, alias resolution and cache signatures |
 | `ge.cpp` | GE initialization, sessions and graph lifecycle |
-| `graph-build.cpp` | Operation dispatch and general ES mappings |
-| `graph-build-matmul.cpp` | Matrix multiplication, GEMV and associated cache-row splicing |
-| `graph-build-attention.cpp` | Flash-attention mapping |
+| `common.cpp` / `common.h` | Shared ACL diagnostics, constants and timing |
+| `ops.cpp` / `ops.h` | Operation dispatch and general ES mappings |
+| `graph-build.cpp` | Assemble graph inputs, nodes and output ports |
+| `mul-mat.cpp` | Matrix multiplication, GEMV and associated cache-row splicing |
+| `fattn.cpp` | Flash-attention mapping |
 | `graph-build-io.cpp` | Graph inputs, views and axis relabeling |
 
-Backend-private declarations belong in `ggml-cannge-priv.h`. Execution context ownership belongs in `ggml-cannge-runtime.h`; ES builder internals belong in `graph-build-priv.h`.
+Shared primitives belong in `common.h`; execution context ownership belongs in `ggml-cannge-impl.h`. Consumers include the relevant module interface (`cpy.h`, `supports.h`, `graph.h`, `mul-mat.h`, or `fattn.h`) instead of a catch-all private header. ES builder internals remain in `graph-build-priv.h`.
+
+The dependency flow is `ggml-cannge.cpp -> graph.cpp -> graph-build.cpp -> ops.cpp -> operation modules`. `plan.cpp` supplies per-call analysis and `ge.cpp` owns the GE session. When adding an operation, declare its interface in its own header, include that header in `ops.cpp`, and register the files in this directory's CMake target.
 
 ## Support decisions and configuration
 
