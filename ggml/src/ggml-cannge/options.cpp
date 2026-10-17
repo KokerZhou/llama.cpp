@@ -1,11 +1,23 @@
 #include "options.h"
 
+#include <cerrno>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
 static int64_t ggml_cannge_integer_option(const char * name, int64_t fallback) {
     const char * value = std::getenv(name);
-    return value != nullptr ? std::strtoll(value, nullptr, 10) : fallback;
+    if (value == nullptr) {
+        return fallback;
+    }
+    char * end = nullptr;
+    errno = 0;
+    const int64_t parsed = std::strtoll(value, &end, 10);
+    if (end == value || *end != '\0' || errno == ERANGE) {
+        std::fprintf(stderr, "CANNGE: invalid integer for %s; using default %lld\n", name, (long long) fallback);
+        return fallback;
+    }
+    return parsed;
 }
 
 ggml_cannge_options ggml_cannge_options::from_env() {

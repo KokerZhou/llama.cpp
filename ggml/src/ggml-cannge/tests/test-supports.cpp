@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <utility>
 
 static void check(bool result, const char * message) {
     if (!result) { std::fprintf(stderr, "FAIL: %s\n", message); std::exit(1); }
@@ -291,7 +292,34 @@ static void test_softmax_support() {
     expect_support(output, nullptr);
 }
 
+static void test_integer_options() {
+    const char * name = "GGML_CANNGE_FA_PRE";
+    const char * previous = std::getenv(name);
+    const bool was_set = previous != nullptr;
+    const std::string saved = was_set ? previous : "";
+    auto set = [&](const char * value) {
+#ifdef _WIN32
+        check(_putenv_s(name, value != nullptr ? value : "") == 0, "set test environment");
+#else
+        check((value != nullptr ? setenv(name, value, 1) : unsetenv(name)) == 0, "set test environment");
+#endif
+    };
+    for (const char * invalid : {"garbage", "123tail", "9223372036854775808", "-9223372036854775809"}) {
+        set(invalid);
+        check(ggml_cannge_options::from_env().attention_pre_tokens == 2147483647, "invalid integer uses default");
+    }
+    for (const auto & valid : {std::pair<const char *, int64_t>{"0", 0}, {"42", 42}, {"-1", -1},
+                              {"9223372036854775807", INT64_MAX}, {"-9223372036854775808", INT64_MIN}}) {
+        set(valid.first);
+        check(ggml_cannge_options::from_env().attention_pre_tokens == valid.second, "valid signed integer preserved");
+    }
+    set(nullptr);
+    check(ggml_cannge_options::from_env().attention_pre_tokens == 2147483647, "unset integer uses default");
+    set(was_set ? saved.c_str() : nullptr);
+}
+
 int main() {
+    test_integer_options();
     test_copy_support();
     test_softmax_support();
     test_matmul_support();
