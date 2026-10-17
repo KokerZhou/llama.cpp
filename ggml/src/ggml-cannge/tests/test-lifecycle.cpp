@@ -6,6 +6,8 @@
 #include <cstdlib>
 
 static bool fail_sync = false;
+static bool fail_destroy = false;
+static int destroy_calls = 0;
 static bool fail_device = false;
 static int free_calls = 0;
 
@@ -19,7 +21,10 @@ aclError aclrtSynchronizeStream(aclrtStream) {
     cannge_test::events.push_back("sync");
     return fail_sync ? 1 : ACL_SUCCESS;
 }
-aclError aclrtDestroyStream(aclrtStream) { return ACL_SUCCESS; }
+aclError aclrtDestroyStream(aclrtStream) {
+    destroy_calls++;
+    return fail_destroy ? 1 : ACL_SUCCESS;
+}
 aclError aclrtFree(void * ptr) {
     if (ptr != nullptr) { free_calls++; cannge_test::events.push_back("free"); }
     return ACL_SUCCESS;
@@ -124,5 +129,20 @@ int main() {
     events.clear();
     ggml_cannge_release_context(nullptr);
     check(events.empty(), "retired context is released only once");
+    auto * destroy_failed = new ggml_backend_cannge_context(0);
+    destroy_failed->ge.reset(ggml_cannge_ge_context::create(0, err));
+    add_plan(*destroy_failed, "destroy-failed", 0, true);
+    const int before_destroy = destroy_calls;
+    const int before_destroy_free = free_calls;
+    fail_destroy = true;
+    ggml_cannge_release_context(destroy_failed);
+    check(destroy_calls == before_destroy + 1, "stream destruction attempted after drain");
+    check(graphs.empty() && free_calls == before_destroy_free + 1, "drained session and buffers released before destroy retry");
+    fail_destroy = false;
+    ggml_cannge_release_context(nullptr);
+    check(destroy_calls == before_destroy + 2, "failed stream destruction retains a retry path");
+    check(free_calls == before_destroy_free + 1, "destroy retry does not free buffers twice");
+    ggml_cannge_release_context(nullptr);
+    check(destroy_calls == before_destroy + 2, "successful stream destruction removes retired context");
     std::puts("PASS: CANNGE eviction and graph rollback failure recovery");
 }

@@ -31,14 +31,7 @@ ggml_backend_cannge_context::ggml_backend_cannge_context(int32_t device) : devic
     initialized = ggml_cannge_check(aclrtCreateStream(&stream), "aclrtCreateStream", __func__) && stream != nullptr;
 }
 
-ggml_backend_cannge_context::~ggml_backend_cannge_context() {
-    // release_context has selected the device and drained the stream.
-    ge.reset();
-    plans.clear();
-    if (stream != nullptr) {
-        ggml_cannge_check(aclrtDestroyStream(stream), "aclrtDestroyStream", __func__);
-    }
-}
+ggml_backend_cannge_context::~ggml_backend_cannge_context() = default;
 
 bool ggml_backend_cannge_context::evict_oldest_plan() {
     auto oldest = plans.end();
@@ -97,6 +90,16 @@ void ggml_cannge_release_context(ggml_backend_cannge_context * ctx) {
              !ggml_cannge_check(aclrtSynchronizeStream(candidate->stream), "drain retired context", __func__))) {
             link = &candidate->next_retired;
             continue;
+        }
+        // Completion is established; session and buffers no longer need the stream.
+        candidate->ge.reset();
+        candidate->plans.clear();
+        if (candidate->stream != nullptr) {
+            if (!ggml_cannge_check(aclrtDestroyStream(candidate->stream), "destroy retired context stream", __func__)) {
+                link = &candidate->next_retired;
+                continue;
+            }
+            candidate->stream = nullptr;
         }
         *link = candidate->next_retired;
         candidate->next_retired = nullptr;
