@@ -105,7 +105,53 @@ static void reset() {
     fail_sync = false; fail_copy = 0; fail_async = 0; fail_alloc = 0;
     copy_calls = 0; async_calls = 0; alloc_calls = 0; events.clear();
 }
+static void test_batched_row_conversion() {
+    for (ggml_type source_type : {GGML_TYPE_F16, GGML_TYPE_F32}) {
+        for (bool host : {false, true}) {
+            reset();
+            const ggml_type destination_type = source_type == GGML_TYPE_F16 ? GGML_TYPE_F32 : GGML_TYPE_F16;
+            auto src = tensor(source_type, 2, 2, nullptr);
+            auto dst = tensor(destination_type, 2, 3, nullptr);
+            auto idx = tensor(GGML_TYPE_I32, 2, 1, nullptr);
+            src.ne[2] = dst.ne[2] = 2;
+            src.nb[1] = 4 * src.nb[0]; // Two padding elements between rows.
+            src.nb[2] = 2 * src.nb[1]; src.nb[3] = 2 * src.nb[2];
+            dst.nb[3] = 2 * dst.nb[2];
+            std::vector<char> data(ggml_nbytes(&src), 0);
+            std::vector<char> result(ggml_nbytes(&dst), 0);
+            std::vector<char> expected(result.size(), 0);
+            dst.data = result.data();
+            if (host) { dst.buffer = reinterpret_cast<ggml_backend_buffer_t>(&dst); }
+            const std::vector<int64_t> slots{2, 0};
+            auto store = [](char * address, ggml_type type, float value) {
+                if (type == GGML_TYPE_F32) {
+                    std::memcpy(address, &value, sizeof(value));
+                } else {
+                    const auto half = ggml_fp32_to_fp16(value);
+                    std::memcpy(address, &half, sizeof(half));
+                }
+            };
+            for (int batch = 0; batch < 2; batch++) {
+                for (int row = 0; row < 2; row++) {
+                    for (int column = 0; column < 2; column++) {
+                        const float value = float(1 + batch * 4 + row * 2 + column);
+                        store(data.data() + batch * src.nb[2] + row * src.nb[1] + column * src.nb[0], source_type, value);
+                        store(expected.data() + batch * dst.nb[2] + slots[row] * dst.nb[1] + column * dst.nb[0], destination_type, value);
+                    }
+                }
+            }
+            ggml_cannge_set_rows_op op{&dst, &src, &idx};
+            check(ggml_cannge_set_rows(op, slots, data, nullptr), "batched padded row conversion");
+            check(result == expected, "converted rows preserve batches, slot mapping and untouched rows");
+            check(async_calls == 0 && pending.empty(), "row conversion storage is not retained");
+            check(copy_calls == (host ? 0 : 4), "each device row completes its blocking upload");
+        }
+    }
+    reset();
+}
+
 int main() {
+    test_batched_row_conversion();
     float values[] = {1, 2, 3, 4};
     float destination[6]{};
     auto src = tensor(GGML_TYPE_F32, 2, 2, values);

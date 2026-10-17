@@ -210,14 +210,12 @@ bool ggml_cannge_set_rows(const ggml_cannge_set_rows_op & op, const std::vector<
         }
     }
 
-    std::vector<char> converted;
-    if (es_src != es_dst) {
-        if (data.size() / es_src > std::numeric_limits<size_t>::max() / es_dst) {
-            return false;
-        }
-        converted.resize(data.size() / es_src * es_dst);
+    if ((uint64_t) src->ne[0] > std::numeric_limits<size_t>::max() / es_dst) {
+        return false;
     }
     const size_t row_size = (size_t) src->ne[0] * es_dst;
+    // Each blocking upload finishes before the next row reuses this storage.
+    std::vector<char> converted(es_src != es_dst ? row_size : 0);
     // Blocking uploads use the default stream; finish graph writes before scattering rows.
     if (!host && !ggml_cannge_check(aclrtSynchronizeStream(stream), "SET_ROWS synchronization", __func__)) {
         return false;
@@ -231,7 +229,7 @@ bool ggml_cannge_set_rows(const ggml_cannge_set_rows_op & op, const std::vector<
                 const char * row = data.data() + offset;
                 char * dst_row = (char *) dst->data + slots[slot_id] * dst->nb[1] + i2 * dst->nb[2] + i3 * dst->nb[3];
                 if (es_src != es_dst) {
-                    char * cast_row = converted.data() + offset / es_src * es_dst;
+                    char * cast_row = converted.data();
                     for (int64_t e = 0; e < src->ne[0]; e++) {
                         if (src->type == GGML_TYPE_F32) {
                             ((ggml_fp16_t *) cast_row)[e] = ggml_fp32_to_fp16(((const float *) row)[e]);
