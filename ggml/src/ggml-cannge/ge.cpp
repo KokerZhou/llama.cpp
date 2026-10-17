@@ -59,8 +59,7 @@ static bool ge_global_init(int32_t device, std::string & err) {
     }
 
     std::map<ge::AscendString, ge::AscendString> config = {
-        // TODO(M7): ge.exec.deviceId is global and pins the first device;
-        // multi-device support needs per-device GE sessions with a refactor
+        // Global default; each session selects its device with ge.session_device_id.
         { "ge.exec.deviceId", std::to_string(device).c_str() },
         { "ge.graphRunMode", "0" },
         { "ge.tiling_schedule_optimize", "1" },

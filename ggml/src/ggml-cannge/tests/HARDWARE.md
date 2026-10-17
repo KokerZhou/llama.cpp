@@ -1,6 +1,7 @@
 # CANNGE hardware validation
 
 Status: not run for the refactoring series. SDK-free tests are not substitutes for these checks.
+The [official API contract audit](API-AUDIT.md) records documentation evidence and unresolved assumptions separately from runtime validation.
 Run on an Ascend host with its matching driver and CANN SDK. Do not download SDK images or build on the local Windows workstation. Preserve branch `cannge` and use separate build directories or source archives for comparisons; do not rewrite history or switch branches.
 
 ## Record the environment
