@@ -292,12 +292,12 @@ bool ggml_cannge_build_node(ggml_cannge_build_context & ctx, ggml_tensor * node)
             // never changes the element count; cont_2d relabels (size-1 merge)
             // reshape to the node's shape - plain alias would carry the SRC
             // shape downstream (Mul_2 E40021, note-46 批11a)
-            if (!ggml_is_contiguous(src0) && getenv("GGML_CANNGE_CONT_NC") == nullptr &&
-                getenv("GGML_CANNGE_NO_CONT_NC") == nullptr) {
+            if (!ggml_is_contiguous(src0) && !ctx.io.options.contiguous_views &&
+                !ctx.io.options.disable_contiguous_views) {
                 // default-accepted since the fresh-row splice makes the
                 // merged-fragment read correct (note-50 batch K); both envs
                 // are kept as escape hatches during the transition
-            } else if (!ggml_is_contiguous(src0) && getenv("GGML_CANNGE_NO_CONT_NC") != nullptr) {
+            } else if (!ggml_is_contiguous(src0) && ctx.io.options.disable_contiguous_views) {
                 return ctx.fail(std::string("non-contiguous CONT input ") + src0->name);
             }
             if (ggml_nelements(src0) != ggml_nelements(node)) {
@@ -452,7 +452,7 @@ bool ggml_cannge_build_node(ggml_cannge_build_context & ctx, ggml_tensor * node)
             // different buffer than the in-graph consumers (writeback diverges
             // while in-graph values stay correct; note-52 batch N). Add a
             // broadcast zero to force a private materialization for the port.
-            if (src0 != nullptr && getenv("GGML_CANNGE_SR_ADD0") != nullptr) {
+            if (src0 != nullptr && ctx.io.options.scatter_add_zero) {
                 cannge_es::EsTensorHolder datah;
                 if (ctx.get(src0, datah)) {
                     ge::DataType dt0;

@@ -226,7 +226,9 @@ static bool ggml_cannge_plan_record_io(ggml_cannge_plan_io & io, ggml_tensor * t
     return true;
 }
 
-bool ggml_cannge_plan_analyze(ggml_cgraph * cgraph, ggml_cannge_plan_io & io, std::string & err) {
+bool ggml_cannge_plan_analyze(ggml_cgraph * cgraph, ggml_cannge_plan_io & io, std::string & err,
+                              const ggml_cannge_options & options) {
+    io.options = options;
     const int n_nodes = cgraph->n_nodes;
 
     if (getenv("GGML_CANNGE_DEBUG_BUILD")) {
@@ -275,7 +277,7 @@ bool ggml_cannge_plan_analyze(ggml_cgraph * cgraph, ggml_cannge_plan_io & io, st
     std::unordered_map<ggml_tensor *, bool> sr_in_graph;
     // GE ScatterUpdate/TensorScatterUpdate silently no-op on this stack (probe-
     // verified, note-49): the in-graph write stays opt-in until a working primitive exists
-    const bool scatter_enabled = getenv("GGML_CANNGE_SCATTER") != nullptr;
+    const bool scatter_enabled = options.scatter;
     for (int i = 0; i < n_nodes; i++) {
         ggml_tensor * node = cgraph->nodes[i];
         if (ggml_is_empty(node) || node->op != GGML_OP_SET_ROWS) {
@@ -395,7 +397,7 @@ bool ggml_cannge_plan_analyze(ggml_cgraph * cgraph, ggml_cannge_plan_io & io, st
     // and the post-execute host scatter is skipped. This replaces the
     // Kcur/Vcur forced data ports that GE's runtime refresh mechanism
     // collapses into one buffer when many same-shaped outputs share a graph.
-    if (getenv("GGML_CANNGE_CONT_NC") != nullptr) {
+    if (options.contiguous_views) {
         for (int i = 0; i < n_nodes; i++) {
             ggml_tensor * node = cgraph->nodes[i];
             if (ggml_is_empty(node) || node->op != GGML_OP_SET_ROWS || node->src[2] == nullptr) {
@@ -421,7 +423,7 @@ bool ggml_cannge_plan_analyze(ggml_cgraph * cgraph, ggml_cannge_plan_io & io, st
         if (node->op == GGML_OP_NONE) {
             continue;
         }
-        const char * force_out = getenv("GGML_CANNGE_DUMP");
+        const char * force_out = options.dump_present ? options.dump_filter.c_str() : nullptr;
         if (n_consumers[node] == 0 || (node->flags & GGML_TENSOR_FLAG_OUTPUT) ||
             (force_out != nullptr && strstr(node->name, force_out) != nullptr)) {
             // a DENSE view that aliases an external input needs no GE output
@@ -657,22 +659,7 @@ std::string ggml_cannge_plan_signature(ggml_cgraph * cgraph, const ggml_cannge_p
         append_i32(sr.in_graph);
     }
 
-    // These options change the compiled graph even when its ports stay the same.
-    const char * const graph_options[] = {
-        "GGML_CANNGE_GEMV16", "GGML_CANNGE_GQA", "GGML_CANNGE_NO_SPLICE",
-        "GGML_CANNGE_CONT_NC", "GGML_CANNGE_NO_CONT_NC", "GGML_CANNGE_SR_ADD0",
-        "GGML_CANNGE_FA_LAYOUT", "GGML_CANNGE_FA_INPERM", "GGML_CANNGE_FA_OUTPERM",
-        "GGML_CANNGE_FA_PRE", "GGML_CANNGE_FA_NEXT", "GGML_CANNGE_FA_IFA_ALL", "GGML_CANNGE_FA_ASL",
-    };
-    for (const char * option : graph_options) {
-        const char * value = getenv(option);
-        append_i32(value != nullptr);
-        if (value != nullptr) {
-            const size_t size = strlen(value);
-            append_u64(size);
-            sig.append(value, size);
-        }
-    }
+    sig.append(io.options.signature());
 
     return sig;
 }

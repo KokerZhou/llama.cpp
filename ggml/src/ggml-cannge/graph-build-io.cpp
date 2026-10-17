@@ -328,7 +328,7 @@ static bool ggml_cannge_splice_fresh_row(ggml_cannge_build_context & ctx, ggml_t
         return true;
     }
     const ggml_cannge_set_rows_op * sr =
-        getenv("GGML_CANNGE_NO_SPLICE") == nullptr ? ggml_cannge_sr_for_base(ctx, vinfo.base) : nullptr;
+        !ctx.io.options.disable_splice ? ggml_cannge_sr_for_base(ctx, vinfo.base) : nullptr;
     if (getenv("GGML_CANNGE_DEBUG_BUILD")) {
         fprintf(stderr, "[DBG-SPLICE] cont-side v=%s base=%s sr=%s\n", v->name, vinfo.base->name,
                 sr ? "found" : "none");

@@ -9,6 +9,7 @@ The layout follows the sibling CPU/CUDA backends: a backend entry point, shared 
 | `ggml-cannge.cpp` | Backend registration, device discovery, buffers, transfers and events |
 | `graph.cpp` | Context and plan lifetime, graph compilation, binding, execution and output completion |
 | `supports.cpp` | Scheduling policy and per-operation capability predicates |
+| `options.cpp` / `options.h` | Parsed graph configuration and its cache signature |
 | `cpy.cpp` | Layout conversion, staging allocation and row scatter |
 | `plan.cpp` | Per-call IO analysis, alias resolution and cache signatures |
 | `ge.cpp` | GE initialization, sessions and graph lifecycle |
@@ -37,7 +38,9 @@ The existing environment-variable behavior is preserved. Most disable flags test
 
 Use `GGML_CANNGE_DEBUG_COMPILE` to see policy rejections and compilation diagnostics, `GGML_CANNGE_DEBUG_BUILD` for graph mapping, `GGML_CANNGE_DEBUG_IO` for transfer checksums, and `GGML_CANNGE_DEBUG_TIMING` for timing totals. These diagnostics can synchronize or copy device data and are unsuitable for performance measurements.
 
-When adding a graph-affecting option, update the plan signature as well as the builder. Do not change configuration concurrently with execution.
+Graph execution captures `ggml_cannge_options` once and passes it to capability checks and IO analysis. The analyzed IO owns that snapshot; builders and the plan signature read it without rereading the environment. Scheduler capability callbacks capture their own current options. Parsed values determine cache identity, so equivalent spellings of a presence flag or integer share a key.
+
+When adding a graph-affecting option, add its field, environment parsing and signature serialization in `options.h` / `options.cpp`, then consume the field in the predicate or builder. Presence and value remain separate for GQA and dump filters: the GQA predicate validates the mode while its builder uses presence, preserving the existing policy. Diagnostic logging and `GGML_CANNGE_NO_WONCE` remain live controls; `GGML_CANNGE_GRAPH` remains a startup switch. Do not change configuration concurrently with execution.
 
 ## Execution stages
 

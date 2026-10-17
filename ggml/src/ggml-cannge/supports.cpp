@@ -37,27 +37,24 @@ bool ggml_cannge_float_dtype(enum ggml_type type) {
     return type == GGML_TYPE_F16 || type == GGML_TYPE_F32;
 }
 
-static const char * ggml_cannge_disabled_by(const ggml_tensor * op) {
-    if (getenv("GGML_CANNGE_DISABLE_ALL")) {
+static const char * ggml_cannge_disabled_by(const ggml_tensor * op, const ggml_cannge_options & options) {
+    if (options.disable_all) {
         return "GGML_CANNGE_DISABLE_ALL";
     }
-    const char * option = nullptr;
     switch (op->op) {
-        case GGML_OP_ADD: option = "GGML_CANNGE_NO_ADDMUL"; break;
-        case GGML_OP_SUB: option = "GGML_CANNGE_NO_ADDMUL"; break;
-        case GGML_OP_MUL: option = "GGML_CANNGE_NO_ADDMUL"; break;
-        case GGML_OP_DIV: option = "GGML_CANNGE_NO_ADDMUL"; break;
-        case GGML_OP_SOFT_MAX: option = "GGML_CANNGE_NO_SOFTMAX"; break;
-        case GGML_OP_UNARY: option = "GGML_CANNGE_NO_UNARY"; break;
-        case GGML_OP_RMS_NORM: option = "GGML_CANNGE_NO_RMS"; break;
-        case GGML_OP_MUL_MAT: option = "GGML_CANNGE_NO_MATMUL"; break;
-        case GGML_OP_GET_ROWS: option = "GGML_CANNGE_NO_GET_ROWS"; break;
-        case GGML_OP_ROPE: option = "GGML_CANNGE_NO_ROPE"; break;
-        case GGML_OP_FLASH_ATTN_EXT:
-            return getenv("GGML_CANNGE_FA") ? nullptr : "GGML_CANNGE_FA is unset";
-        default: break;
+        case GGML_OP_ADD:
+        case GGML_OP_SUB:
+        case GGML_OP_MUL:
+        case GGML_OP_DIV: return options.disable_binary ? "GGML_CANNGE_NO_ADDMUL" : nullptr;
+        case GGML_OP_SOFT_MAX: return options.disable_softmax ? "GGML_CANNGE_NO_SOFTMAX" : nullptr;
+        case GGML_OP_UNARY: return options.disable_unary ? "GGML_CANNGE_NO_UNARY" : nullptr;
+        case GGML_OP_RMS_NORM: return options.disable_rms ? "GGML_CANNGE_NO_RMS" : nullptr;
+        case GGML_OP_MUL_MAT: return options.disable_matmul ? "GGML_CANNGE_NO_MATMUL" : nullptr;
+        case GGML_OP_GET_ROWS: return options.disable_get_rows ? "GGML_CANNGE_NO_GET_ROWS" : nullptr;
+        case GGML_OP_ROPE: return options.disable_rope ? "GGML_CANNGE_NO_ROPE" : nullptr;
+        case GGML_OP_FLASH_ATTN_EXT: return options.flash_attention ? nullptr : "GGML_CANNGE_FA is unset";
+        default: return nullptr;
     }
-    return option != nullptr && getenv(option) != nullptr ? option : nullptr;
 }
 
 static bool ggml_cannge_supports_binary(const ggml_tensor * op) {
@@ -135,7 +132,8 @@ static bool ggml_cannge_supports_unary(const ggml_tensor * op) {
     }
 }
 
-static bool ggml_cannge_supports_gemv(const ggml_tensor * weights, const ggml_tensor * input) {
+static bool ggml_cannge_supports_gemv(const ggml_tensor * weights, const ggml_tensor * input,
+                                      const ggml_cannge_options & options) {
     if (input->ne[1] != 1 || ggml_n_dims(weights) < 2) {
         return false;
     }
@@ -149,7 +147,7 @@ static bool ggml_cannge_supports_gemv(const ggml_tensor * weights, const ggml_te
         return false;
     }
 
-    const char * mode = getenv("GGML_CANNGE_GQA");
+    const char * mode = options.gqa_present ? options.gqa_mode.c_str() : nullptr;
     if (mode == nullptr) {
         return false;
     }
@@ -161,7 +159,7 @@ static bool ggml_cannge_supports_gemv(const ggml_tensor * weights, const ggml_te
     return strcmp(mode, required_mode) == 0;
 }
 
-static bool ggml_cannge_supports_matmul(const ggml_tensor * op) {
+static bool ggml_cannge_supports_matmul(const ggml_tensor * op, const ggml_cannge_options & options) {
     const ggml_tensor * src0 = op->src[0];
     const ggml_tensor * src1 = op->src[1];
     if (src0 == nullptr || src1 == nullptr || !ggml_cannge_float_dtype(op->type)) {
@@ -189,7 +187,7 @@ static bool ggml_cannge_supports_matmul(const ggml_tensor * op) {
                 src1 ? (long long) src1->ne[0] : -1, src1 ? (long long) src1->ne[1] : -1,
                 src1 ? (long long) src1->ne[2] : -1, src1 ? (long long) src1->ne[3] : -1);
     }
-    if (ggml_cannge_supports_gemv(src0, src1)) {
+    if (ggml_cannge_supports_gemv(src0, src1, options)) {
         // huge-N gemvs (the lm head) used to stay on CPU because GE's
         // mul pre-compile rejects one large broadcast (E40021); the
         // build now chunks the weight under the cap and concats
@@ -239,7 +237,7 @@ static bool ggml_cannge_supports_matmul(const ggml_tensor * op) {
     // (note-10, old CANN); rechecked on 9.1.0 with a 10.5M-element
     // weight probe: exact (1.4e-6, probe bigmm). The cap is gone; keep
     // an opt-out knob in case a future GE revision regresses
-    if (src0->ne[0] * src0->ne[1] > 262144 && getenv("GGML_CANNGE_BIGMM") != nullptr) {
+    if (src0->ne[0] * src0->ne[1] > 262144 && options.limit_matmul) {
         return false;
     }
     return ggml_n_dims(src0) >= 2 && ggml_n_dims(src0) <= 4 && src0->ne[2] == src1->ne[2] &&
@@ -459,8 +457,7 @@ static bool ggml_cannge_supports_attention(const ggml_tensor * op) {
 // L0 static capability table (docs/cannge D3): doc-supported (op, dtype,
 // shape) combos only, conservative rejects are by design; GE adds/Mul broadcast
 // dims that are equal or 1, MatMul contraction is ne0 of both operands
-bool ggml_backend_cannge_device_supports_op(ggml_backend_dev_t dev, const ggml_tensor * op) {
-    GGML_UNUSED(dev);
+bool ggml_cannge_supports_op(const ggml_tensor * op, const ggml_cannge_options & options) {
 
     if (!ggml_backend_cannge_graph_env_enabled()) {
         return false;
@@ -482,7 +479,7 @@ bool ggml_backend_cannge_device_supports_op(ggml_backend_dev_t dev, const ggml_t
 
     // debug knob: reject every compute op, isolates backend-presence effects
     // (buffer assignment, boundary copies) from op-mapping correctness
-    if (const char * option = ggml_cannge_disabled_by(op)) {
+    if (const char * option = ggml_cannge_disabled_by(op, options)) {
         if (getenv("GGML_CANNGE_DEBUG_COMPILE")) {
             GGML_LOG_DEBUG("CANNGE: %s (%s) disabled by %s\n", op->name, ggml_op_name(op->op), option);
         }
@@ -536,7 +533,7 @@ bool ggml_backend_cannge_device_supports_op(ggml_backend_dev_t dev, const ggml_t
             return src0 != nullptr && ggml_cannge_float_dtype(src0->type) && ggml_cannge_float_dtype(op->type);
 
         case GGML_OP_MUL_MAT:
-            return ggml_cannge_supports_matmul(op);
+            return ggml_cannge_supports_matmul(op, options);
 
         case GGML_OP_CONT:
             // non-contiguous CONT opts into the merged attention
@@ -544,7 +541,7 @@ bool ggml_backend_cannge_device_supports_op(ggml_backend_dev_t dev, const ggml_t
             // fragment read correct, but the 1432-node merged graph mis-executes
             // at model scale while the isolated probe is exact - root cause
             // under investigation (note-52). Default stays split (coherent).
-            if (getenv("GGML_CANNGE_CONT_NC") == nullptr) {
+            if (!options.contiguous_views) {
                 return src0 != nullptr && ggml_cannge_float_dtype(src0->type) && ggml_cannge_float_dtype(op->type) &&
                        ggml_is_contiguous(src0);
             }
@@ -594,9 +591,14 @@ bool ggml_backend_cannge_device_supports_op(ggml_backend_dev_t dev, const ggml_t
     }
 }
 
+bool ggml_backend_cannge_device_supports_op(ggml_backend_dev_t dev, const ggml_tensor * op) {
+    GGML_UNUSED(dev);
+    return ggml_cannge_supports_op(op, ggml_cannge_options::from_env());
+}
+
 bool ggml_backend_cannge_device_supports_buft(ggml_backend_dev_t dev, ggml_backend_buffer_type_t buft) {
     GGML_UNUSED(dev);
-    if (getenv("GGML_CANNGE_HOST_BUFT")) {
+    if (ggml_cannge_options::from_env().host_buffers) {
         return buft->iface.get_name == ggml_backend_cannge_buffer_type_name ||
                buft->iface.get_name == ggml_backend_cpu_buffer_type()->iface.get_name;
     }

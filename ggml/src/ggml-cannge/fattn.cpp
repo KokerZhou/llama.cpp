@@ -78,9 +78,9 @@ bool ggml_cannge_build_attention(ggml_cannge_build_context & ctx, ggml_tensor * 
                 (long long) src2->ne[1], (long long) src2->ne[2], (long long) src2->nb[0],
                 (long long) src2->nb[1], (long long) src2->nb[2], (int) src2->type);
     }
-    const char * fa_layout = getenv("GGML_CANNGE_FA_LAYOUT") ? getenv("GGML_CANNGE_FA_LAYOUT") : "BSND";
-    const bool   fa_inperm = getenv("GGML_CANNGE_FA_INPERM") != nullptr;
-    const bool   fa_outperm = getenv("GGML_CANNGE_FA_OUTPERM") != nullptr;
+    const char * fa_layout = ctx.io.options.attention_layout.c_str();
+    const bool   fa_inperm = ctx.io.options.attention_input_permute;
+    const bool   fa_outperm = ctx.io.options.attention_output_permute;
     auto to_bsnd = [&](const ggml_tensor * t, cannge_es::EsTensorHolder & es) {
         const int64_t d = t->ne[0], s = t->ne[1], n = t->ne[2];
         auto r = cannge_es::Reshape(es, std::vector<int64_t>{ 1, s, n, d });
@@ -132,10 +132,10 @@ bool ggml_cannge_build_attention(ggml_cannge_build_context & ctx, ggml_tensor * 
     }
 
     cannge_es::EsTensorHolder y;
-    const int64_t fa_pre  = getenv("GGML_CANNGE_FA_PRE")  ? atoll(getenv("GGML_CANNGE_FA_PRE"))  : 2147483647;
-    const int64_t fa_next = getenv("GGML_CANNGE_FA_NEXT") ? atoll(getenv("GGML_CANNGE_FA_NEXT")) : 2147483647;
-    const bool fa_ifa_all = getenv("GGML_CANNGE_FA_IFA_ALL") != nullptr;
-    const int64_t fa_asl  = getenv("GGML_CANNGE_FA_ASL") ? atoll(getenv("GGML_CANNGE_FA_ASL")) : 0;
+    const int64_t fa_pre  = ctx.io.options.attention_pre_tokens;
+    const int64_t fa_next = ctx.io.options.attention_next_tokens;
+    const bool fa_ifa_all = ctx.io.options.attention_ifa_all;
+    const int64_t fa_asl  = ctx.io.options.attention_sequence_length;
     if (s_q == 1 || fa_ifa_all) {
         // decode: incremental FA over the padded KV cache. IFA is the
         // streaming op: kv validity is carried by actual_seq_lengths

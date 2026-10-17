@@ -84,8 +84,7 @@ bool ggml_cannge_build_matmul(ggml_cannge_build_context & ctx, ggml_tensor * nod
         // gemvs are bandwidth-bound (post-sync time halved, note-49 H);
         // GE accumulates the reduction internally, probe-measured
         // max_rel 5.5e-4 vs f32
-        const char * g16 = getenv("GGML_CANNGE_GEMV16");
-        const bool f16prod = g16 == nullptr || strcmp(g16, "0") != 0;
+        const bool f16prod = ctx.io.options.gemv_f16;
         ge::DataType f32;
         if (!ggml_cannge_ge_dtype(f16prod ? GGML_TYPE_F16 : GGML_TYPE_F32, f32)) {
             return ctx.fail("no GE product dtype for gemv");
@@ -149,7 +148,7 @@ bool ggml_cannge_build_matmul(ggml_cannge_build_context & ctx, ggml_tensor * nod
     }
     const bool gqa_ratio = src0->ne[2] != src1->ne[2] && src0->ne[2] > 0 &&
                            src1->ne[2] % src0->ne[2] == 0;
-    const bool gqa_on    = gqa_ratio && getenv("GGML_CANNGE_GQA") != nullptr;
+    const bool gqa_on    = gqa_ratio && ctx.io.options.gqa_present;
     if (src1->ne[1] == 1 && ggml_n_dims(src0) >= 2 && src0->ne[3] == src1->ne[3] &&
         (src0->ne[2] == src1->ne[2] || gqa_on)) {
         // batched M==1 GEMV (classic attention kq/v over heads):
@@ -161,8 +160,7 @@ bool ggml_cannge_build_matmul(ggml_cannge_build_context & ctx, ggml_tensor * nod
         // same f16-product rationale as the M==1 branch (note-50 H);
         // these products are small ({G,R,N,K} <= a few MB) so the win
         // is minor, but it is free
-        const char * bg16 = getenv("GGML_CANNGE_GEMV16");
-        const bool bf16prod = bg16 == nullptr || strcmp(bg16, "0") != 0;
+        const bool bf16prod = ctx.io.options.gemv_f16;
         ge::DataType f32;
         if (!ggml_cannge_ge_dtype(bf16prod ? GGML_TYPE_F16 : GGML_TYPE_F32, f32)) {
             return ctx.fail("no GE f32 dtype for gemv");
@@ -196,7 +194,7 @@ bool ggml_cannge_build_matmul(ggml_cannge_build_context & ctx, ggml_tensor * nod
         // the cache pre-scatter; when the fragment produces Kcur, add
         // the current slot's scores (one tiny gemv) at the slot index
         // of the pre-relabel sum {B3,B2,N(,K consumed)}
-        if (getenv("GGML_CANNGE_NO_SPLICE") == nullptr) {
+        if (!ctx.io.options.disable_splice) {
             ggml_cannge_view_info kinfo;
             if (getenv("GGML_CANNGE_DEBUG_BUILD")) {
                 fprintf(stderr, "[DBG-SPLICE] kq-side src0=%s vsrc=%p\n", src0->name, (void *) src0->view_src);

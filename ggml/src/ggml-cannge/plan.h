@@ -23,6 +23,7 @@
 #pragma once
 
 #include "ggml.h"
+#include "options.h"
 
 #include <cstdint>
 #include <set>
@@ -64,6 +65,7 @@ struct ggml_cannge_set_rows_op {
 // every graph_compute, the compute context (and its tensors) may be freed
 // between calls
 struct ggml_cannge_plan_io {
+    ggml_cannge_options options;
     std::vector<ggml_tensor *> inputs;       // external inputs, producerless srcs
     std::vector<ggml_tensor *> outputs;      // boundary outputs plus flagged nodes
     std::vector<ggml_tensor *> side_effects; // in-place written tensors (GGML_OP_SET)
@@ -144,6 +146,7 @@ bool ggml_cannge_resolve_view(ggml_tensor * t, ggml_cannge_view_info & info);
 // inside that base; returns nullptr if the view cannot be resolved
 ggml_tensor * ggml_cannge_resolve_view_base(ggml_tensor * node, const std::set<ggml_tensor *> & registered, size_t & offset);
 
-bool ggml_cannge_plan_analyze(ggml_cgraph * cgraph, ggml_cannge_plan_io & io, std::string & err);
+bool ggml_cannge_plan_analyze(ggml_cgraph * cgraph, ggml_cannge_plan_io & io, std::string & err,
+                              const ggml_cannge_options & options = ggml_cannge_options::from_env());
 
 std::string ggml_cannge_plan_signature(ggml_cgraph * cgraph, const ggml_cannge_plan_io & io);

@@ -80,6 +80,8 @@ if (CANN_INSTALL_DIR)
     ggml_add_backend_library(ggml-cannge
                              ggml-cannge.cpp
                              common.cpp
+                             options.cpp
+                             options.h
                              ops.cpp
                              graph.cpp
                              cpy.cpp

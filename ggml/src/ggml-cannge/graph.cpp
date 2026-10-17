@@ -742,7 +742,7 @@ enum ggml_status ggml_backend_cannge_graph_compute(ggml_backend_t backend, ggml_
     const double dbg_t0 = g_dbg_time.on ? g_dbg_time.now() : 0;
 
     // static capability pre-check (L0 gate of the fallback ladder)
-    ggml_backend_dev_t dev = ggml_backend_reg_dev_get(ggml_backend_cannge_reg(), ctx->device);
+    const ggml_cannge_options options = ggml_cannge_options::from_env();
     for (int i = 0; i < cgraph->n_nodes; i++) {
         ggml_tensor * node = cgraph->nodes[i];
         if (ggml_is_empty(node) || node->op == GGML_OP_NONE) {
@@ -754,7 +754,7 @@ enum ggml_status ggml_backend_cannge_graph_compute(ggml_backend_t backend, ggml_
                     node->src[1]->name, (long long) node->src[1]->ne[0], (long long) node->src[1]->ne[1],
                     (long long) node->src[1]->ne[2], (long long) node->src[1]->ne[3]);
         }
-        if (!ggml_backend_cannge_device_supports_op(dev, node)) {
+        if (!ggml_cannge_supports_op(node, options)) {
             GGML_LOG_ERROR("%s: op %d not supported by CANNGE\n", __func__, (int) node->op);
             return GGML_STATUS_FAILED;
         }
@@ -766,7 +766,7 @@ enum ggml_status ggml_backend_cannge_graph_compute(ggml_backend_t backend, ggml_
     // tensors) may be freed between graph_compute calls, so nothing that
     // survives in the plan cache may reference ggml tensors
     ggml_cannge_plan_io io;
-    if (!ggml_cannge_plan_analyze(cgraph, io, err)) {
+    if (!ggml_cannge_plan_analyze(cgraph, io, err, options)) {
         GGML_LOG_ERROR("%s: plan analyze failed: %s\n", __func__, err.c_str());
         return GGML_STATUS_FAILED;
     }
