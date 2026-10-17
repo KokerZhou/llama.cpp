@@ -542,17 +542,15 @@ bool ggml_cannge_supports_op(const ggml_tensor * op, const ggml_cannge_options &
             return accept(ggml_cannge_supports_matmul(op, options), "matmul type, contraction, alignment, batch dimensions or configured size limit is unsupported");
 
         case GGML_OP_CONT:
-            // non-contiguous CONT opts into the merged attention
-            // (GGML_CANNGE_CONT_NC): the fresh-row splice makes the merged
-            // fragment read correct, but the 1432-node merged graph mis-executes
-            // at model scale while the isolated probe is exact - root cause
-            // under investigation (note-52). Default stays split (coherent).
-            if (!options.contiguous_views) {
-                return accept(src0 != nullptr && ggml_cannge_float_dtype(src0->type) && ggml_cannge_float_dtype(op->type) &&
-                              ggml_is_contiguous(src0), "CONT requires a dense F16/F32 source unless GGML_CANNGE_CONT_NC is set");
+            if (src0 == nullptr || !ggml_cannge_float_dtype(src0->type) || !ggml_cannge_float_dtype(op->type) ||
+                ggml_nelements(src0) != ggml_nelements(op)) {
+                return accept(false, "CONT requires F16/F32 tensors with equal element counts");
             }
-            return accept(src0 != nullptr && ggml_cannge_float_dtype(src0->type) && ggml_cannge_float_dtype(op->type) &&
-                          ggml_nelements(src0) == ggml_nelements(op), "CONT requires F16/F32 tensors with equal element counts");
+            if (!ggml_is_contiguous(src0) && !options.allow_noncontiguous_cont()) {
+                return accept(false, options.disable_contiguous_views ? "GGML_CANNGE_NO_CONT_NC" :
+                              "non-contiguous CONT requires GGML_CANNGE_CONT_NC");
+            }
+            return true;
 
         case GGML_OP_CPY:
             return accept(ggml_cannge_supports_copy(op), "copy requires F16/F32 tensors with matching shapes and a dense, non-view destination");

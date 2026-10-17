@@ -61,18 +61,8 @@ bool ggml_cannge_build_tensor(ggml_cannge_build_context & ctx, ggml_tensor * nod
             if (!ctx.get(src0, es0)) {
                 return false;
             }
-            // GGML_CANNGE_CONT_NC: non-dense inputs staged in the view's own
-            // shape (isolated-opbench OK, in-model corrupt - opt-in). cont
-            // never changes the element count; cont_2d relabels (size-1 merge)
-            // reshape to the node's shape - plain alias would carry the SRC
-            // shape downstream (Mul_2 E40021, note-46 批11a)
-            if (!ggml_is_contiguous(src0) && !ctx.io.options.contiguous_views &&
-                !ctx.io.options.disable_contiguous_views) {
-                // default-accepted since the fresh-row splice makes the
-                // merged-fragment read correct (note-50 batch K); both envs
-                // are kept as escape hatches during the transition
-            } else if (!ggml_is_contiguous(src0) && ctx.io.options.disable_contiguous_views) {
-                return ctx.fail(std::string("non-contiguous CONT input ") + src0->name);
+            if (!ggml_is_contiguous(src0) && !ctx.io.options.allow_noncontiguous_cont()) {
+                return ctx.fail(std::string("non-contiguous CONT is disabled: ") + node->name);
             }
             if (ggml_nelements(src0) != ggml_nelements(node)) {
                 return ctx.fail(std::string("element-changing CONT ") + node->name);

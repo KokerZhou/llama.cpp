@@ -190,7 +190,7 @@ class ggml_cannge_plan_analysis {
         // and the post-execute host scatter is skipped. This replaces the
         // Kcur/Vcur forced data ports that GE's runtime refresh mechanism
         // collapses into one buffer when many same-shaped outputs share a graph.
-        if (options.contiguous_views) {
+        if (options.allow_noncontiguous_cont()) {
             for (int i = 0; i < n_nodes; i++) {
                 ggml_tensor * node = cgraph->nodes[i];
                 if (ggml_is_empty(node) || node->op != GGML_OP_SET_ROWS || node->src[2] == nullptr) {

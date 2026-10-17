@@ -29,6 +29,5 @@ bool ggml_is_contiguous(const ggml_tensor * t) {
     }
     return true;
 }
-bool ggml_cannge_float_dtype(ggml_type type) { return type == GGML_TYPE_F32 || type == GGML_TYPE_F16; }
 bool ggml_backend_buffer_is_host(ggml_backend_buffer_t) { return false; }
 const char * ggml_op_name(ggml_op) { return "test-op"; }

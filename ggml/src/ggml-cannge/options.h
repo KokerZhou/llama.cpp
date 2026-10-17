@@ -34,6 +34,10 @@ struct ggml_cannge_options {
     int64_t attention_next_tokens = 2147483647;
     int64_t attention_sequence_length = 0;
 
+    bool allow_noncontiguous_cont() const {
+        return contiguous_views && !disable_contiguous_views;
+    }
+
     static ggml_cannge_options from_env();
     std::string signature() const;
 };

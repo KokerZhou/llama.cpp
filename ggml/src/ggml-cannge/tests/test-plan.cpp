@@ -1,4 +1,5 @@
 #include "plan.h"
+#include "supports.h"
 #include "ggml-impl.h"
 
 #include <cstdio>
@@ -86,6 +87,34 @@ int main() {
     ggml_cannge_plan_io merged;
     check(ggml_cannge_plan_analyze(&scatter.graph, merged, err, options), "merged cache analysis");
     check(merged.set_rows[0].in_graph && merged.output_tensors.size() == 1, "merged cache output deduplicated");
+
+    // The disable switch must override the opt-in in scheduling and side-effect planning.
+    auto cont_source = scatter.tensors[0];
+    cont_source.ne[0] = 2; cont_source.ne[1] = 2;
+    cont_source.nb[0] = 8; cont_source.nb[1] = 4;
+    auto cont_output = scatter.tensors[0];
+    cont_output.op = GGML_OP_CONT; cont_output.src[0] = &cont_source;
+    for (bool enabled : {false, true}) {
+        for (bool disabled : {false, true}) {
+            options = {};
+            options.contiguous_views = enabled;
+            options.disable_contiguous_views = disabled;
+            const bool allowed = enabled && !disabled;
+            const char * reason = nullptr;
+            check(ggml_cannge_supports_op(&cont_output, options, &reason) == allowed, "CONT flag precedence");
+            check(allowed ? reason == nullptr : reason != nullptr, "CONT rejection diagnostic");
+            if (disabled) { check(std::strcmp(reason, "GGML_CANNGE_NO_CONT_NC") == 0, "disable reason"); }
+            ggml_cannge_plan_io policy;
+            check(ggml_cannge_plan_analyze(&scatter.graph, policy, err, options), "CONT policy plan");
+            check(policy.set_rows[0].in_graph == allowed, "planning agrees with CONT gate");
+            cont_source.nb[0] = 4; cont_source.nb[1] = 8;
+            check(ggml_cannge_supports_op(&cont_output, options), "dense CONT unaffected by flags");
+            cont_output.ne[0]++;
+            check(!ggml_cannge_supports_op(&cont_output, options), "dense CONT cannot change element count");
+            cont_output.ne[0]--;
+            cont_source.nb[0] = 8; cont_source.nb[1] = 4;
+        }
+    }
 
     fixture views;
     auto & cache = views.tensors[0];
