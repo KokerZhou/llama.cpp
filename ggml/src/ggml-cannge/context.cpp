@@ -50,27 +50,43 @@ bool ggml_backend_cannge_context::evict_oldest_plan() {
             !ge->remove(oldest->second->graph_id)) {
             return false;
         }
+        oldest->second->graph_id = 0;
+        if (!oldest->second->release_buffers()) {
+            return false;
+        }
         plans.erase(oldest);
     }
     return true;
 }
 
+bool ggml_cannge_plan::release_buffers() {
+    state = FAILED;
+    bool released = true;
+    auto release = [&](void *& pointer, bool host = false) {
+        if (pointer == nullptr) {
+            return;
+        }
+        const aclError error = host ? aclrtFreeHost(pointer) : aclrtFree(pointer);
+        if (ggml_cannge_check(error, host ? "aclrtFreeHost" : "aclrtFree", __func__)) {
+            pointer = nullptr;
+        } else {
+            released = false;
+        }
+    };
+    for (void *& pointer : staging) {
+        release(pointer);
+    }
+    for (void *& pointer : input_staging) {
+        release(pointer);
+    }
+    release(in_arena);
+    release(in_arena_host, true);
+    release(fa_asl_dev);
+    return released;
+}
+
 ggml_cannge_plan::~ggml_cannge_plan() {
-    for (void * p : staging) {
-        aclrtFree(p);
-    }
-    for (void * p : input_staging) {
-        aclrtFree(p);
-    }
-    if (in_arena != nullptr) {
-        aclrtFree(in_arena);
-    }
-    if (in_arena_host != nullptr) {
-        aclrtFreeHost(in_arena_host);
-    }
-    if (fa_asl_dev != nullptr) {
-        aclrtFree(fa_asl_dev);
-    }
+    release_buffers();
 }
 
 void ggml_cannge_release_context(ggml_backend_cannge_context * ctx) {
@@ -93,6 +109,16 @@ void ggml_cannge_release_context(ggml_backend_cannge_context * ctx) {
         }
         // Completion is established; session and buffers no longer need the stream.
         candidate->ge.reset();
+        bool released = true;
+        for (auto & entry : candidate->plans) {
+            if (!entry.second->release_buffers()) {
+                released = false;
+            }
+        }
+        if (!released) {
+            link = &candidate->next_retired;
+            continue;
+        }
         candidate->plans.clear();
         if (candidate->stream != nullptr) {
             if (!ggml_cannge_check(aclrtDestroyStream(candidate->stream), "destroy retired context stream", __func__)) {

@@ -10,6 +10,8 @@ static bool fail_destroy = false;
 static int destroy_calls = 0;
 static bool fail_device = false;
 static int free_calls = 0;
+static void * fail_free = nullptr;
+static int failed_free_calls = 0;
 
 static void check(bool result, const char * message) {
     if (!result) { std::fprintf(stderr, "FAIL: %s\n", message); std::exit(1); }
@@ -26,6 +28,7 @@ aclError aclrtDestroyStream(aclrtStream) {
     return fail_destroy ? 1 : ACL_SUCCESS;
 }
 aclError aclrtFree(void * ptr) {
+    if (ptr != nullptr && ptr == fail_free) { failed_free_calls++; return 1; }
     if (ptr != nullptr) { free_calls++; cannge_test::events.push_back("free"); }
     return ACL_SUCCESS;
 }
@@ -144,5 +147,29 @@ int main() {
     check(free_calls == before_destroy_free + 1, "destroy retry does not free buffers twice");
     ggml_cannge_release_context(nullptr);
     check(destroy_calls == before_destroy + 2, "successful stream destruction removes retired context");
+    auto * cleanup = new ggml_backend_cannge_context(0);
+    cleanup->ge.reset(ggml_cannge_ge_context::create(0, err));
+    add_plan(*cleanup, "free-failed", 0, true);
+    auto & plan = *cleanup->plans.at("free-failed");
+    int failed_allocation = 0;
+    plan.in_arena_host = &failed_allocation;
+    fail_free = &failed_allocation;
+    const int before_cleanup_free = free_calls;
+    const int before_cleanup_remove = remove_calls;
+    check(!cleanup->evict_oldest_plan(), "failed buffer release retains plan");
+    check(plan.state == ggml_cannge_plan::FAILED && plan.graph_id == 0, "partly released plan cannot execute");
+    check(plan.staging[0] == nullptr && plan.in_arena_host == fail_free, "only failed allocation retains ownership");
+    check(free_calls == before_cleanup_free + 1 && graphs.empty(), "graph removed and successful allocation released");
+    check(!cleanup->evict_oldest_plan(), "failed allocation can be retried");
+    check(remove_calls == before_cleanup_remove + 1 && free_calls == before_cleanup_free + 1,
+          "retry does not remove graph or free successful allocations twice");
+    const int before_cleanup_destroy = destroy_calls;
+    ggml_cannge_release_context(cleanup);
+    check(destroy_calls == before_cleanup_destroy, "shutdown retains stream while allocation release fails");
+    fail_free = nullptr;
+    ggml_cannge_release_context(nullptr);
+    check(free_calls == before_cleanup_free + 2 && destroy_calls == before_cleanup_destroy + 1,
+          "shutdown retry releases final allocation and stream");
+    check(failed_free_calls == 3, "eviction and shutdown retry the failed allocation");
     std::puts("PASS: CANNGE eviction and graph rollback failure recovery");
 }

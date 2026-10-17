@@ -128,7 +128,9 @@ struct ggml_cannge_plan {
     // from the visible-prefix length of io.fa_mask on every execute
     void * fa_asl_dev = nullptr;
 
-    ~ggml_cannge_plan(); // frees all staging, defined where ACL is available
+    // Requires completed work and a removed graph/session. Retain failed allocations for retry.
+    bool release_buffers();
+    ~ggml_cannge_plan();
 };
 
 // Replace IO on success; leave it unchanged on failure. Success clears err.
