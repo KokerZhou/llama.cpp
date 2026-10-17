@@ -31,6 +31,61 @@ struct fixture {
         graph.nodes = nodes; graph.n_nodes = 2;
     }
 };
+static void test_matmul_support() {
+    fixture f;
+    auto weights = f.tensors[0];
+    auto input = f.tensors[0];
+    auto product = f.tensors[0];
+    weights.ne[0] = input.ne[0] = 64;
+    weights.ne[1] = input.ne[1] = 32;
+    product.op = GGML_OP_MUL_MAT;
+    product.src[0] = &weights;
+    product.src[1] = &input;
+    ggml_cannge_options options;
+    auto expect = [&](const char * expected) {
+        const char * reason = "stale";
+        check(ggml_cannge_supports_op(&product, options, &reason) == (expected == nullptr), "matmul support outcome");
+        check(expected == nullptr ? reason == nullptr : reason != nullptr && std::strcmp(reason, expected) == 0,
+              "matmul constraint diagnostic");
+    };
+    expect(nullptr);
+    product.src[0] = nullptr;
+    expect("matmul requires weights and input tensors");
+    product.src[0] = &weights; product.type = GGML_TYPE_I32;
+    expect("matmul weights, input and output must be F16/F32");
+    product.type = GGML_TYPE_F32; input.ne[0] = 32;
+    expect("matmul contraction dimensions must match");
+    input.ne[0] = 64; input.type = GGML_TYPE_F16;
+    expect("batched matmul requires matching types or F16 weights with F32 input");
+    input.type = GGML_TYPE_F32; weights.type = GGML_TYPE_F16;
+    expect(nullptr);
+    for (auto * dimension : {&weights.ne[0], &weights.ne[1], &input.ne[1]}) {
+        const auto saved = *dimension;
+        *dimension = 17;
+        if (dimension == &weights.ne[0]) { input.ne[0] = 17; }
+        expect("batched matmul M/N/K dimensions do not meet GE alignment requirements");
+        *dimension = saved;
+        input.ne[0] = weights.ne[0];
+    }
+    weights.ne[2] = 2;
+    expect("batched matmul requires matching ranks from two through four");
+    input.ne[2] = 3;
+    expect("batched matmul batch dimensions must match");
+    input.ne[2] = weights.ne[2] = 1;
+    weights.ne[0] = input.ne[0] = 512; weights.ne[1] = 512;
+    options.limit_matmul = true;
+    expect(nullptr);
+    weights.ne[1] += 16;
+    expect("matmul weight matrix exceeds GGML_CANNGE_BIGMM limit");
+    options.limit_matmul = false;
+    expect(nullptr);
+    options.limit_matmul = true; input.ne[1] = 1;
+    expect(nullptr); // Chunked GEMV bypasses the BatchMatMul size cap.
+    weights.type = GGML_TYPE_F32; input.type = GGML_TYPE_F16;
+    weights.ne[0] = input.ne[0] = 17;
+    expect(nullptr); // GEMV casts mixed types and accepts unaligned contractions.
+}
+
 static void test_rope_support() {
     fixture f;
     auto data = f.tensors[0];
@@ -93,6 +148,7 @@ static void test_rope_support() {
 }
 
 int main() {
+    test_matmul_support();
     test_rope_support();
     fixture f, relocated;
     ggml_cannge_options options;

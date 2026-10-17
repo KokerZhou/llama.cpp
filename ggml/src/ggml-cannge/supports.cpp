@@ -159,89 +159,48 @@ bool ggml_cannge_use_gemv(const ggml_tensor * weights, const ggml_tensor * input
     return strcmp(mode, required_mode) == 0;
 }
 
-static bool ggml_cannge_supports_matmul(const ggml_tensor * op, const ggml_cannge_options & options) {
-    const ggml_tensor * src0 = op->src[0];
-    const ggml_tensor * src1 = op->src[1];
-    if (src0 == nullptr || src1 == nullptr || !ggml_cannge_float_dtype(op->type)) {
-        return false;
+static const char * ggml_cannge_matmul_rejection(const ggml_tensor * op, const ggml_cannge_options & options) {
+    const ggml_tensor * weights = op->src[0];
+    const ggml_tensor * input = op->src[1];
+    if (weights == nullptr || input == nullptr) {
+        return "matmul requires weights and input tensors";
     }
-    // both operands must share the contraction dtype for the batched
-    // MatMulV3 path; the M==1 GEMV build casts both sides to f32, so
-    // it accepts mixed f16 weights x f32 activations (decode norm
-    // outputs feeding the QKV/FFN projections)
-    if (!ggml_cannge_float_dtype(src0->type) || !ggml_cannge_float_dtype(src1->type)) {
-        return false;
+    if (!ggml_cannge_float_dtype(weights->type) || !ggml_cannge_float_dtype(input->type) ||
+        !ggml_cannge_float_dtype(op->type)) {
+        return "matmul weights, input and output must be F16/F32";
     }
-    if (src0->ne[0] != src1->ne[0]) {
-        return false; // contraction dim mismatch
+    if (weights->ne[0] != input->ne[0]) {
+        return "matmul contraction dimensions must match";
     }
-    // M==1 GEMV (optionally batched over heads): BatchMatMulV3 would
-    // need M aligned and caps weights at 256K elements; the build
-    // maps it to Mul(broadcast)+ReduceSum instead (f32 for
-    // accumulation parity with ggml-cpu, note-37). note: src1 with
-    // trailing singletons reports FEWER ggml dims than src0 - match
-    // on ne, not on ggml_n_dims
-    if (getenv("GGML_CANNGE_DEBUG_COMPILE") && src0 != nullptr && strstr(src0->name, "attn_output") != nullptr) {
-        fprintf(stderr, "[DBG-WO] %s src0=%s ne=%lld,%lld src1=%s ne=%lld,%lld,%lld,%lld\n", op->name,
-                src0->name, (long long) src0->ne[0], (long long) src0->ne[1], src1 ? src1->name : "?",
-                src1 ? (long long) src1->ne[0] : -1, src1 ? (long long) src1->ne[1] : -1,
-                src1 ? (long long) src1->ne[2] : -1, src1 ? (long long) src1->ne[3] : -1);
+    // GEMV uses chunked Mul + ReduceSum and supports mixed types and unaligned dimensions.
+    if (ggml_cannge_use_gemv(weights, input, options)) {
+        return nullptr;
     }
-    if (ggml_cannge_use_gemv(src0, src1, options)) {
-        // huge-N gemvs (the lm head) used to stay on CPU because GE's
-        // mul pre-compile rejects one large broadcast (E40021); the
-        // build now chunks the weight under the cap and concats
-        // (note-50 batch I), so they are accepted here
-        // non-dense or mixed-dtype operands are fine: analyze stages
-        // external views into dense buffers and the build casts both
-        // sides to f32 (permuted cache views feeding the attention
-        // matmuls, f16 weights x f32 activations, note-45)
-        return true;
+    // BatchMatMulV3 casts F16 weights with F32 activations to F32.
+    if (weights->type != input->type && (weights->type != GGML_TYPE_F16 || input->type != GGML_TYPE_F32)) {
+        return "batched matmul requires matching types or F16 weights with F32 input";
     }
-    if (src0->type != src1->type) {
-        // mixed f16 weights x f32 activations: the build casts both
-        // sides to f32 before BatchMatMulV3 (ggml mul_mat accumulates
-        // in f32 anyway). Without this, weight_buft_supported's
-        // loader probe (f32 test activation) fails and llama never
-        // allocates weights on this backend's buffer type - the root
-        // reason all matmuls stayed on CPU (note-46 batch 12a)
-        if (src0->type != GGML_TYPE_F16 || src1->type != GGML_TYPE_F32) {
-            return false;
-        }
-    }
-    // 32-byte alignment of M/N/K: not in the op spec (the aclnn spec
-    // has no alignment constraint and allows non-contiguous inputs),
-    // but the GE graph-compile tiling path hard-fails unaligned
-    // MatMul shapes (CheckDimsAligned310P, EZ9999) on 310P and 910B
-    // alike; reject conservatively, product-independent (note-10 F3).
-    // spec: <https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/latest/API/aolapi/context/ops-nn/aclnnMatmul.md>
+    // GE tiling requires 32-byte M/N/K alignment. On 310P, F32 is down-converted to F16.
 #ifdef ASCEND_310P
-    // 310P TBE registers fp16 only, so GE down-converts F32 matmul inputs
-    // to fp16 before the tiling check (F7, note-10): the 32B rule applies
-    // to the fp16 element size, F32 needs 16 elements (note-16 known precision)
-    const size_t align_elems = src0->type == GGML_TYPE_F32 ? 16 : 32 / ggml_type_size(src0->type);
+    const size_t align_elems = weights->type == GGML_TYPE_F32 ? 16 : 32 / ggml_type_size(weights->type);
 #else
-    const size_t align_elems = 32 / ggml_type_size(src0->type);
+    const size_t align_elems = 32 / ggml_type_size(weights->type);
 #endif
-    if (src0->ne[0] % align_elems != 0 || src0->ne[1] % align_elems != 0 || src1->ne[1] % align_elems != 0) {
-        return false;
+    if (weights->ne[0] % align_elems != 0 || weights->ne[1] % align_elems != 0 || input->ne[1] % align_elems != 0) {
+        return "batched matmul M/N/K dimensions do not meet GE alignment requirements";
     }
-    // non-dense operands (permuted cache/weight views) are staged into
-    // dense buffers as graph IO; no contiguity requirement here
-    // 2D and batched (3D/4D) matmul: leading batch dims must match,
-    // GE BatchMatMulV3 batches on the outermost dims; contraction stays ne0
-    if (ggml_n_dims(src0) != ggml_n_dims(src1)) {
-        return false;
+    const int rank = ggml_n_dims(weights);
+    if (rank != ggml_n_dims(input) || rank < 2 || rank > 4) {
+        return "batched matmul requires matching ranks from two through four";
     }
-    // GE once silently returned zeros for weights above ~256K elements
-    // (note-10, old CANN); rechecked on 9.1.0 with a 10.5M-element
-    // weight probe: exact (1.4e-6, probe bigmm). The cap is gone; keep
-    // an opt-out knob in case a future GE revision regresses
-    if (src0->ne[0] * src0->ne[1] > 262144 && options.limit_matmul) {
-        return false;
+    // Optional workaround for older GE versions that returned zeros above this size.
+    if (weights->ne[0] * weights->ne[1] > 262144 && options.limit_matmul) {
+        return "matmul weight matrix exceeds GGML_CANNGE_BIGMM limit";
     }
-    return ggml_n_dims(src0) >= 2 && ggml_n_dims(src0) <= 4 && src0->ne[2] == src1->ne[2] &&
-           src0->ne[3] == src1->ne[3];
+    if (weights->ne[2] != input->ne[2] || weights->ne[3] != input->ne[3]) {
+        return "batched matmul batch dimensions must match";
+    }
+    return nullptr;
 }
 
 static bool ggml_cannge_supports_copy(const ggml_tensor * op) {
@@ -518,8 +477,10 @@ bool ggml_cannge_supports_op(const ggml_tensor * op, const ggml_cannge_options &
             // in ggml-backend.cpp split pass, note-44)
             return accept(src0 != nullptr && ggml_cannge_float_dtype(src0->type) && ggml_cannge_float_dtype(op->type), "source and output must be F16/F32");
 
-        case GGML_OP_MUL_MAT:
-            return accept(ggml_cannge_supports_matmul(op, options), "matmul type, contraction, alignment, batch dimensions or configured size limit is unsupported");
+        case GGML_OP_MUL_MAT: {
+            const char * rejection = ggml_cannge_matmul_rejection(op, options);
+            return accept(rejection == nullptr, rejection);
+        }
 
         case GGML_OP_CONT:
             if (src0 == nullptr || !ggml_cannge_float_dtype(src0->type) || !ggml_cannge_float_dtype(op->type) ||
