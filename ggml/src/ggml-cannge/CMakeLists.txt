@@ -99,6 +99,7 @@ if (CANN_INSTALL_DIR)
                              graph-build.cpp
                              mul-mat.cpp
                              fattn.cpp
+                             graph-build-view.cpp
                              graph-build-io.cpp
                              common.h
                              ggml-cannge-impl.h

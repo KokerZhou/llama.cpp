@@ -22,7 +22,8 @@ The layout follows the sibling CPU/CUDA backends: a backend entry point, shared 
 | `graph-build.cpp` | Assemble graph inputs, nodes and output ports |
 | `mul-mat.cpp` | Matrix multiplication, GEMV and associated cache-row splicing |
 | `fattn.cpp` | Flash-attention mapping |
-| `graph-build-io.cpp` | Graph inputs, views and axis relabeling |
+| `graph-build-io.cpp` | Graph inputs and fresh-row splicing |
+| `graph-build-view.cpp` | Tensor lookup, views, axis relabeling and checked prefix slices |
 
 Shared primitives belong in `common.h`; execution context ownership belongs in `ggml-cannge-impl.h`. Consumers include the relevant module interface (`cpy.h`, `supports.h`, `graph.h`, `mul-mat.h`, or `fattn.h`) instead of a catch-all private header. ES builder internals remain in `graph-build-priv.h`.
 
@@ -48,7 +49,7 @@ When adding a graph-affecting option, add its field, environment parsing and sig
 
 ## Execution stages
 
-`ggml_backend_cannge_graph_compute` coordinates capability checks and IO analysis, then calls separate stages for plan preparation, input binding, output binding, index snapshots, GE execution and output completion. Verbose IO diagnostics are separate from this orchestration. Operation builders that return failure report the node index, tensor name and operation, even when debug logging is disabled. Missing source tensors return a build error.
+`ggml_backend_cannge_graph_compute` coordinates capability checks and IO analysis, then calls separate stages for plan preparation, input binding, output binding, index snapshots, GE execution and output completion. Verbose IO diagnostics are separate from this orchestration. Operation builders that return failure report the node index, tensor name and operation, even when debug logging is disabled. Missing source tensors return a build error. Tensor lookup and CONT fallback validate view chains before walking them, and share a prefix-slice helper that checks element counts and alignment.
 
 Plan preparation includes cache lookup, compilation and loading. Timing totals therefore include loading in `lookup`, rather than `bind`. Input-binding timestamps retain the distinction between staging and its synchronization.
 
