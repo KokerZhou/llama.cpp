@@ -42,6 +42,20 @@ int main() {
 
     view.op = GGML_OP_RESHAPE;
     check(ctx.try_get(&view, holder) == result::success, "supported view reconstruction");
+    ctx.tensors.erase(&view);
+    check(ggml_cannge_build_cont_chain(ctx, &cont, holder) == result::success,
+          "CONT reconstructs an unregistered source from its base");
+    check(ctx.tensors.count(&view) == 1, "CONT shares the lookup reconstruction cache");
+    ctx.tensors.erase(&view);
+    ctx.tensors.erase(&base);
+    holder.id = 99; error = "prior diagnostic";
+    check(ggml_cannge_build_cont_chain(ctx, &cont, holder) == result::not_applicable,
+          "CONT without a registered base is unavailable");
+    check(holder.id == 99 && error == "prior diagnostic", "unavailable CONT preserves output and error");
+    ctx.tensors[&base] = {1};
+    check(ggml_cannge_build_cont_chain(ctx, &cont, holder) == result::success,
+          "CONT becomes available after registering its base");
+
     auto rows = tensor();
     rows.view_src = &base; rows.op = GGML_OP_ADD;
     auto indices = tensor();

@@ -76,38 +76,10 @@ static ggml_cannge_build_result ggml_cannge_build_cont_chain_impl(ggml_cannge_bu
         ctx.fail("invalid view chain for CONT " + std::string(t->name));
         return ggml_cannge_build_result::failure;
     }
-    // preferred: the source was built as a cgraph node in this fragment (its
-    // PERMUTE/TRANSPOSE cases carry the correct byte semantics); the view_src
-    // walk below is only the cross-fragment fallback, and ggml flattens view
-    // chains so the walk cannot be trusted to replay the ops
+    // Lookup uses a registered holder first, then reconstructs a view from its registered base.
     const auto source = ctx.try_get(v, h);
-    if (source == ggml_cannge_build_result::failure) {
+    if (source != ggml_cannge_build_result::success) {
         return source;
-    }
-    if (source == ggml_cannge_build_result::success) {
-        return ggml_cannge_splice_fresh_row(ctx, t, v, h) ? ggml_cannge_build_result::success : ggml_cannge_build_result::failure;
-    }
-    if (!ggml_cannge_is_rearrange_view(v)) {
-        return ggml_cannge_build_result::not_applicable;
-    }
-    std::vector<ggml_tensor *> chain;
-    ggml_tensor *              base = v;
-    while (base->view_src != nullptr) {
-        chain.push_back(base);
-        base = base->view_src;
-    }
-    auto bit = ctx.tensors.find(base);
-    if (bit == ctx.tensors.end()) {
-        return ggml_cannge_build_result::not_applicable;
-    }
-    h = bit->second;
-    if (!ggml_cannge_build_view_prefix(ctx, t, base, h)) {
-        return ggml_cannge_build_result::failure;
-    }
-    for (auto rit = chain.rbegin(); rit != chain.rend(); ++rit) {
-        if (!ggml_cannge_build_relabel(*rit, h, ctx.err)) {
-            return ggml_cannge_build_result::failure;
-        }
     }
     return ggml_cannge_splice_fresh_row(ctx, t, v, h) ? ggml_cannge_build_result::success : ggml_cannge_build_result::failure;
 }
