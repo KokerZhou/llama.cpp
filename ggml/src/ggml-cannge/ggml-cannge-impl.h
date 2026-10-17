@@ -33,6 +33,7 @@ struct ggml_backend_cannge_context {
     int32_t     device = -1;
     std::string name;
     aclrtStream stream = nullptr;
+    bool initialized = false;
 
     std::unique_ptr<ggml_cannge_ge_context> ge;           // lazy, created on first plan compile
     std::map<std::string, std::unique_ptr<ggml_cannge_plan>> plans;

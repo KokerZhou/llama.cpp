@@ -39,7 +39,17 @@ Use `GGML_CANNGE_DEBUG_COMPILE` to see policy rejections and compilation diagnos
 
 When adding a graph-affecting option, update the plan signature as well as the builder. Do not change configuration concurrently with execution.
 
+## Execution stages
+
+`ggml_backend_cannge_graph_compute` coordinates capability checks and IO analysis, then calls separate stages for plan preparation, input binding, output binding, index snapshots, GE execution and output completion. Verbose IO diagnostics are separate from this orchestration.
+
+Plan preparation includes cache lookup, compilation and loading. Timing totals therefore include loading in `lookup`, rather than `bind`. Input-binding timestamps retain the distinction between staging and its synchronization.
+
+Mask and index snapshots are implemented in `cpy.cpp`. They check synchronization and copy results before consuming device data. Index snapshots preserve tensor strides and widen I32 values to I64 only after a successful read; attention-mask reads use the first row's element stride. Failed snapshots stop the graph before GE execution.
+
 ## Ownership and failure handling
+
+Backend initialization rejects failed device selection, failed stream creation and null streams. Execution also checks device selection before preparing a graph.
 
 The execution context owns the GE session and cached plans. Plans own staging allocations; per-call IO analysis holds current tensor pointers. Reusable staging assumes that weight contents remain immutable at a given source address.
 

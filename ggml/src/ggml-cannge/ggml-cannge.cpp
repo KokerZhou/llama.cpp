@@ -529,8 +529,9 @@ ggml_backend_t ggml_backend_cannge_init(int32_t device) {
     }
 
     ggml_backend_cannge_context * ctx = new ggml_backend_cannge_context(device);
-    if (ctx == nullptr) {
-        GGML_LOG_ERROR("%s: error: failed to allocate context\n", __func__);
+    if (!ctx->initialized) {
+        GGML_LOG_ERROR("%s: failed to initialize device stream\n", __func__);
+        delete ctx;
         return nullptr;
     }
 

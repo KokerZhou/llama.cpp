@@ -8,3 +8,6 @@ bool ggml_cannge_reserve_input_arena(void *& device, void *& host, size_t & capa
 struct ggml_cannge_set_rows_op;
 bool ggml_cannge_set_rows(const ggml_cannge_set_rows_op & op, const std::vector<int64_t> & slots,
                           const std::vector<char> & data, aclrtStream stream);
+
+bool ggml_cannge_read_indices(const ggml_tensor * tensor, aclrtStream stream, std::vector<int64_t> & slots);
+bool ggml_cannge_upload_attention_length(const ggml_tensor * mask, void * destination, aclrtStream stream);

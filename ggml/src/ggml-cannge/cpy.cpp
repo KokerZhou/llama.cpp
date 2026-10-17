@@ -34,6 +34,113 @@
 #include <cstring>
 #include <limits>
 
+static bool ggml_cannge_read_host(const ggml_tensor * tensor, size_t size, aclrtStream stream,
+                                  std::vector<char> & snapshot) {
+    snapshot.resize(size);
+    if (tensor->buffer != nullptr && ggml_backend_buffer_is_host(tensor->buffer)) {
+        memcpy(snapshot.data(), tensor->data, size);
+        return true;
+    }
+    if (!ggml_cannge_check(aclrtSynchronizeStream(stream), "snapshot synchronization", __func__)) {
+        return false;
+    }
+    return ggml_cannge_check(aclrtMemcpy(snapshot.data(), size, tensor->data, size, ACL_MEMCPY_DEVICE_TO_HOST),
+                             "tensor snapshot", __func__);
+}
+
+bool ggml_cannge_read_indices(const ggml_tensor * tensor, aclrtStream stream, std::vector<int64_t> & slots) {
+    if (tensor == nullptr || tensor->data == nullptr || tensor->ne[3] != 1) {
+        return false;
+    }
+    if (tensor->type != GGML_TYPE_I32 && tensor->type != GGML_TYPE_I64) {
+        return false;
+    }
+    const size_t es = tensor->type == GGML_TYPE_I64 ? sizeof(int64_t) : sizeof(int32_t);
+    size_t count = 1;
+    size_t span = es;
+    for (int d = 0; d < 3; d++) {
+        if (tensor->ne[d] <= 0 || (uint64_t) tensor->ne[d] > std::numeric_limits<size_t>::max() / count) {
+            return false;
+        }
+        const size_t extent = (size_t) tensor->ne[d];
+        count *= extent;
+        if (extent > 1 && tensor->nb[d] > (std::numeric_limits<size_t>::max() - span) / (extent - 1)) {
+            return false;
+        }
+        span += (extent - 1) * tensor->nb[d];
+    }
+    if (count > std::numeric_limits<size_t>::max() / sizeof(int64_t)) {
+        return false;
+    }
+    std::vector<char> snapshot;
+    if (!ggml_cannge_read_host(tensor, span, stream, snapshot)) {
+        return false;
+    }
+    std::vector<int64_t> result(count);
+    size_t slot = 0;
+    for (int64_t i2 = 0; i2 < tensor->ne[2]; i2++) {
+        for (int64_t i1 = 0; i1 < tensor->ne[1]; i1++) {
+            for (int64_t i0 = 0; i0 < tensor->ne[0]; i0++) {
+                const char * value = snapshot.data() + i0 * tensor->nb[0] + i1 * tensor->nb[1] + i2 * tensor->nb[2];
+                if (tensor->type == GGML_TYPE_I64) {
+                    memcpy(&result[slot], value, sizeof(int64_t));
+                } else {
+                    int32_t index;
+                    memcpy(&index, value, sizeof(index));
+                    result[slot] = index;
+                }
+                slot++;
+            }
+        }
+    }
+    slots.swap(result);
+    return true;
+}
+
+bool ggml_cannge_upload_attention_length(const ggml_tensor * mask, void * destination, aclrtStream stream) {
+    if (mask == nullptr || mask->data == nullptr || destination == nullptr || mask->ne[0] <= 0) {
+        return false;
+    }
+    if (mask->type != GGML_TYPE_F16 && mask->type != GGML_TYPE_F32) {
+        return false;
+    }
+    const size_t es = mask->type == GGML_TYPE_F16 ? sizeof(ggml_fp16_t) : sizeof(float);
+    const uint64_t last = (uint64_t) mask->ne[0] - 1;
+    if (last > 0 && mask->nb[0] > (std::numeric_limits<size_t>::max() - es) / last) {
+        return false;
+    }
+    const size_t span = (size_t) last * mask->nb[0] + es;
+    std::vector<char> snapshot;
+    if (!ggml_cannge_read_host(mask, span, stream, snapshot)) {
+        return false;
+    }
+    int64_t length = mask->ne[0];
+    for (int64_t i = 0; i < mask->ne[0]; i++) {
+        const char * value = snapshot.data() + i * mask->nb[0];
+        float v;
+        if (mask->type == GGML_TYPE_F16) {
+            ggml_fp16_t half;
+            memcpy(&half, value, sizeof(half));
+            v = ggml_fp16_to_fp32(half);
+        } else {
+            memcpy(&v, value, sizeof(v));
+        }
+        if (v < -1.0e4f) {
+            length = i;
+            break;
+        }
+    }
+    // The scalar must be copied before its stack storage leaves scope.
+    if (!ggml_cannge_check(aclrtMemcpy(destination, sizeof(length), &length, sizeof(length), ACL_MEMCPY_HOST_TO_DEVICE),
+                           "attention length upload", __func__)) {
+        return false;
+    }
+    if (getenv("GGML_CANNGE_DEBUG_IO")) {
+        fprintf(stderr, "[DBG-FA] %s asl=%lld n_kv=%lld\n", mask->name, (long long) length, (long long) mask->ne[0]);
+    }
+    return true;
+}
+
 const void * ggml_cannge_staging_source(const ggml_tensor * tensor) {
     if (getenv("GGML_CANNGE_NO_WONCE") != nullptr || tensor->op != GGML_OP_NONE ||
         (tensor->flags & GGML_TENSOR_FLAG_INPUT) || tensor->buffer == nullptr ||
