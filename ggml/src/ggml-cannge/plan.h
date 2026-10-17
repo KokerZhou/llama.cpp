@@ -130,6 +130,7 @@ struct ggml_cannge_plan {
     ~ggml_cannge_plan(); // frees all staging, defined where ACL is available
 };
 
+// Replace IO on success; leave it unchanged on failure. Success clears err.
 bool ggml_cannge_plan_analyze(ggml_cgraph * cgraph, ggml_cannge_plan_io & io, std::string & err,
                               const ggml_cannge_options & options = ggml_cannge_options::from_env());
 

@@ -117,5 +117,24 @@ int main() {
     broken.tensors[0].view_src = &broken.tensors[0];
     ggml_cannge_plan_io invalid;
     check(!ggml_cannge_plan_analyze(&broken.graph, invalid, err, options) && !err.empty(), "broken input chain rejected");
+    check(invalid.inputs.empty() && invalid.output_tensors.empty() && invalid.mem_estimate == 0, "failed analysis publishes no partial IO");
+    std::strcpy(broken.tensors[0].name, "broken_input");
+    auto retained = io;
+    check(!ggml_cannge_plan_analyze(&broken.graph, retained, err, options), "failed replacement");
+    check(err == "invalid input view chain: broken_input", "input diagnostic identifies tensor");
+    check(retained.inputs == io.inputs && retained.output_tensors == io.output_tensors &&
+          retained.mem_estimate == io.mem_estimate && retained.io_views.size() == io.io_views.size(), "failure preserves previous IO");
+    check(key == ggml_cannge_plan_signature(&f.graph, retained), "failure preserves cache key");
+    err = "stale error";
+    check(ggml_cannge_plan_analyze(&f.graph, io, err, io.options), "reuse with aliased options");
+    check(err.empty() && io.inputs.size() == 1 && io.output_tensors.size() == 1 && io.mem_estimate == 48, "reuse replaces ports and accounting");
+    check(key == ggml_cannge_plan_signature(&f.graph, io), "reuse preserves key");
+
+    fixture broken_output;
+    std::strcpy(broken_output.tensors[2].name, "broken_output");
+    broken_output.tensors[2].view_src = &broken_output.tensors[2];
+    check(!ggml_cannge_plan_analyze(&broken_output.graph, retained, err, options), "invalid output rejected");
+    check(err == "invalid output view chain: broken_output", "output diagnostic identifies tensor");
+    check(key == ggml_cannge_plan_signature(&f.graph, retained), "output failure preserves previous analysis");
     std::puts("PASS: CANNGE plan stages and cache binding regressions");
 }

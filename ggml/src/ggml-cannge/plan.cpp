@@ -33,7 +33,7 @@
 static bool ggml_cannge_plan_record_io(ggml_cannge_plan_io & io, ggml_tensor * t, std::string & err) {
     ggml_cannge_view_info info;
     if (!ggml_cannge_resolve_view(t, info)) {
-        err = "broken view chain";
+        err = "invalid side-effect view chain: " + std::string(t->name);
         return false;
     }
     if (!info.is_dense) {
@@ -333,7 +333,7 @@ class ggml_cannge_plan_analysis {
             ggml_tensor * t = io.inputs[i];
             ggml_cannge_view_info info;
             if (!ggml_cannge_resolve_view(t, info)) {
-                err = "broken view chain";
+                err = "invalid input view chain: " + std::string(t->name);
                 return false;
             }
             if (!info.is_dense) {
@@ -356,7 +356,7 @@ class ggml_cannge_plan_analysis {
             ggml_tensor * t = io.outputs[i];
             ggml_cannge_view_info info;
             if (!ggml_cannge_resolve_view(t, info)) {
-                err = "broken view chain";
+                err = "invalid output view chain: " + std::string(t->name);
                 return false;
             }
             if (!info.is_dense) {
@@ -408,7 +408,13 @@ class ggml_cannge_plan_analysis {
 
 bool ggml_cannge_plan_analyze(ggml_cgraph * cgraph, ggml_cannge_plan_io & io, std::string & err,
                               const ggml_cannge_options & options) {
-    return ggml_cannge_plan_analysis(cgraph, io, err, options).run();
+    ggml_cannge_plan_io analyzed;
+    if (!ggml_cannge_plan_analysis(cgraph, analyzed, err, options).run()) {
+        return false;
+    }
+    io = std::move(analyzed);
+    err.clear();
+    return true;
 }
 
 std::string ggml_cannge_plan_signature(ggml_cgraph * cgraph, const ggml_cannge_plan_io & io) {

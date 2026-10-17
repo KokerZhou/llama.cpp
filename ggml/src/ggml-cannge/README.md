@@ -50,7 +50,7 @@ When adding a graph-affecting option, add its field, environment parsing and sig
 
 ## Plan analysis
 
-The plan analyzer separates graph indexing, external inputs, boundary outputs, side effects, output-port ordering, layout resolution and memory estimation. The coordinator keeps this order explicit; producer and consumer maps are local to one analysis. The separate debug stage does not change planning decisions.
+The plan analyzer separates graph indexing, external inputs, boundary outputs, side effects, output-port ordering, layout resolution and memory estimation. The coordinator keeps this order explicit; producer and consumer maps are local to one analysis. The separate debug stage does not change planning decisions. Analysis replaces the IO result only after all stages succeed; failure preserves the previous result and identifies the invalid input, output or side-effect view. Reusing an IO object does not accumulate ports or memory estimates.
 
 ## Execution stages
 
