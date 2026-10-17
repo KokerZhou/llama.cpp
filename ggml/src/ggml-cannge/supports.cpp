@@ -74,34 +74,33 @@ static bool ggml_cannge_supports_binary(const ggml_tensor * op) {
     return true;
 }
 
-static bool ggml_cannge_supports_softmax(const ggml_tensor * op) {
-    const ggml_tensor * src0 = op->src[0];
-    const ggml_tensor * src1 = op->src[1];
-    if (src0 == nullptr || !ggml_cannge_float_dtype(src0->type) ||
-        !ggml_cannge_float_dtype(op->type)) {
-        return false;
+static const char * ggml_cannge_softmax_rejection(const ggml_tensor * op) {
+    const ggml_tensor * data = op->src[0];
+    const ggml_tensor * mask = op->src[1];
+    if (data == nullptr || !ggml_cannge_float_dtype(data->type) || !ggml_cannge_float_dtype(op->type)) {
+        return "softmax requires F16/F32 data and output";
     }
-    float scale = 1.0f;
-    float max_bias = 0.0f;
-    std::memcpy(&scale, (const float *) op->op_params + 0, sizeof(scale));
-    std::memcpy(&max_bias, (const float *) op->op_params + 1, sizeof(max_bias));
-    // attention sinks (src[2]) and ALiBi slopes have no GE mapping yet
-    if (op->src[2] != nullptr || max_bias != 0.0f) {
-        return false;
+    if (op->src[2] != nullptr) {
+        return "softmax attention sinks are unsupported";
     }
-    // optional mask, added after scaling; row width must match, other
-    // dims broadcast like ADD (GE equal-or-1, docs/cannge note-7)
-    if (src1 != nullptr) {
-        if (!ggml_cannge_float_dtype(src1->type) || src1->ne[0] != src0->ne[0]) {
-            return false;
+    if (ggml_get_op_params_f32(op, 1) != 0.0f) {
+        return "softmax ALiBi is unsupported";
+    }
+    if (mask == nullptr) {
+        return nullptr;
+    }
+    if (!ggml_cannge_float_dtype(mask->type)) {
+        return "softmax mask must be F16/F32";
+    }
+    if (mask->ne[0] != data->ne[0]) {
+        return "softmax mask row width must match data";
+    }
+    for (int d = 1; d < GGML_MAX_DIMS; d++) {
+        if (mask->ne[d] != 1 && mask->ne[d] != data->ne[d]) {
+            return "softmax mask dimensions must equal data dimensions or one";
         }
-        for (int d = 1; d < GGML_MAX_DIMS; d++) {
-            if (src1->ne[d] != 1 && src0->ne[d] != src1->ne[d]) {
-                return false;
-            }
-        }
     }
-    return true;
+    return nullptr;
 }
 
 static bool ggml_cannge_supports_unary(const ggml_tensor * op) {
@@ -203,22 +202,25 @@ static const char * ggml_cannge_matmul_rejection(const ggml_tensor * op, const g
     return nullptr;
 }
 
-static bool ggml_cannge_supports_copy(const ggml_tensor * op) {
-    const ggml_tensor * src0 = op->src[0];
-    const ggml_tensor * src1 = op->src[1];
-    // F16 <-> F32 via Cast; aliased same-dtype copies into views are
-    // rejected until the writeback mechanism is enabled
-    const bool ok = src0 != nullptr && src1 != nullptr && ggml_cannge_float_dtype(src0->type) &&
-                    ggml_cannge_float_dtype(op->type) && ggml_are_same_shape(src0, src1) &&
-                    src1->view_src == nullptr && ggml_is_contiguous(src1);
-    if (!ok && getenv("GGML_CANNGE_DEBUG_COMPILE")) {
-        fprintf(stderr, "[DBG-GATE] cpy %s reject: s0=%p s1=%p t=%d/%d same=%d vsrc=%p contig=%d\n",
-                op->name, (const void *) src0, (const void *) src1, src0 ? (int) src0->type : -1,
-                (int) op->type, src0 && src1 ? (int) ggml_are_same_shape(src0, src1) : -1,
-                src1 ? (void *) src1->view_src : nullptr,
-                src1 ? (int) ggml_is_contiguous(src1) : -1);
+static const char * ggml_cannge_copy_rejection(const ggml_tensor * op) {
+    const ggml_tensor * source = op->src[0];
+    const ggml_tensor * destination = op->src[1];
+    if (source == nullptr || destination == nullptr) {
+        return "copy requires source and destination tensors";
     }
-    return ok;
+    if (!ggml_cannge_float_dtype(source->type) || !ggml_cannge_float_dtype(op->type)) {
+        return "copy source and output must be F16/F32";
+    }
+    if (!ggml_are_same_shape(source, destination)) {
+        return "copy source and destination shapes must match";
+    }
+    if (destination->view_src != nullptr) {
+        return "copy into a view is unsupported";
+    }
+    if (!ggml_is_contiguous(destination)) {
+        return "copy destination must be contiguous";
+    }
+    return nullptr;
 }
 
 static bool ggml_cannge_supports_set_rows(const ggml_tensor * op) {
@@ -460,8 +462,10 @@ bool ggml_cannge_supports_op(const ggml_tensor * op, const ggml_cannge_options &
         case GGML_OP_SCALE:
             return accept(src0 != nullptr && ggml_cannge_float_dtype(src0->type) && ggml_cannge_float_dtype(op->type), "source and output must be F16/F32");
 
-        case GGML_OP_SOFT_MAX:
-            return accept(ggml_cannge_supports_softmax(op), "softmax requires F16/F32 tensors, compatible mask dimensions, no sinks and no ALiBi");
+        case GGML_OP_SOFT_MAX: {
+            const char * rejection = ggml_cannge_softmax_rejection(op);
+            return accept(rejection == nullptr, rejection);
+        }
 
         case GGML_OP_UNARY:
             return accept(ggml_cannge_supports_unary(op), "unary tensor type or activation is unsupported");
@@ -493,8 +497,10 @@ bool ggml_cannge_supports_op(const ggml_tensor * op, const ggml_cannge_options &
             }
             return true;
 
-        case GGML_OP_CPY:
-            return accept(ggml_cannge_supports_copy(op), "copy requires F16/F32 tensors with matching shapes and a dense, non-view destination");
+        case GGML_OP_CPY: {
+            const char * rejection = ggml_cannge_copy_rejection(op);
+            return accept(rejection == nullptr, rejection);
+        }
 
         case GGML_OP_DUP:
             // same-dtype copy into the node's own buffer (in-place variants are

@@ -227,7 +227,73 @@ static void test_attention_support() {
 
 }
 
+static void expect_support(const ggml_tensor & op, const char * expected) {
+    const char * reason = "stale";
+    check(ggml_cannge_supports_op(&op, {}, &reason) == (expected == nullptr), "support outcome");
+    check(expected == nullptr ? reason == nullptr : reason != nullptr && std::strcmp(reason, expected) == 0,
+          "constraint diagnostic");
+}
+
+static void test_copy_support() {
+    auto source = tensor();
+    auto destination = tensor();
+    destination.op = GGML_OP_CPY;
+    destination.src[0] = &source;
+    destination.src[1] = &destination; // ggml encodes CPY's destination as the node itself.
+    expect_support(destination, nullptr);
+    source.type = GGML_TYPE_F16;
+    expect_support(destination, nullptr);
+    destination.src[0] = nullptr;
+    expect_support(destination, "copy requires source and destination tensors");
+    destination.src[0] = &source; source.type = GGML_TYPE_I32;
+    expect_support(destination, "copy source and output must be F16/F32");
+    source.type = GGML_TYPE_F32; source.ne[0] = 2;
+    expect_support(destination, "copy source and destination shapes must match");
+    source.ne[0] = 4; destination.view_src = &source;
+    expect_support(destination, "copy into a view is unsupported");
+    destination.view_src = nullptr; destination.nb[0] = 8;
+    expect_support(destination, "copy destination must be contiguous");
+    destination.nb[0] = 4; source.nb[0] = 8;
+    expect_support(destination, nullptr); // Source views are staged; destination must be dense.
+}
+
+static void test_softmax_support() {
+    auto data = tensor();
+    auto mask = tensor();
+    auto output = tensor();
+    output.op = GGML_OP_SOFT_MAX;
+    output.src[0] = &data;
+    const float scale = 0.5f;
+    std::memcpy(output.op_params, &scale, sizeof(scale));
+    expect_support(output, nullptr);
+    output.src[0] = nullptr;
+    expect_support(output, "softmax requires F16/F32 data and output");
+    output.src[0] = &data; output.src[2] = &mask;
+    expect_support(output, "softmax attention sinks are unsupported");
+    output.src[2] = nullptr;
+    std::memcpy(output.op_params + 1, &scale, sizeof(scale));
+    expect_support(output, "softmax ALiBi is unsupported");
+    output.op_params[1] = 0; output.src[1] = &mask; mask.type = GGML_TYPE_I32;
+    expect_support(output, "softmax mask must be F16/F32");
+    mask.type = GGML_TYPE_F16; mask.ne[0] = 1;
+    expect_support(output, "softmax mask row width must match data");
+    mask.ne[0] = data.ne[0];
+    for (int dimension = 1; dimension < GGML_MAX_DIMS; dimension++) {
+        data.ne[dimension] = 4;
+        mask.ne[dimension] = 1;
+        expect_support(output, nullptr);
+        mask.ne[dimension] = 4;
+        expect_support(output, nullptr);
+        mask.ne[dimension] = 2;
+        expect_support(output, "softmax mask dimensions must equal data dimensions or one");
+        mask.ne[dimension] = data.ne[dimension] = 1;
+    }
+    expect_support(output, nullptr);
+}
+
 int main() {
+    test_copy_support();
+    test_softmax_support();
     test_matmul_support();
     test_rope_support();
     test_gemv_support();
