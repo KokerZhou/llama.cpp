@@ -30,7 +30,7 @@ target_compile_features(test-cannge-cpy PRIVATE cxx_std_17)
 target_include_directories(test-cannge-cpy PRIVATE stubs .. ../.. ../../../include)
 add_test(NAME cannge-cpy COMMAND test-cannge-cpy)
 
-add_executable(test-cannge-build-lookup test-build-lookup.cpp metadata-stubs.cpp support-stubs.cpp ../graph-build-view.cpp ../graph-build-io.cpp ../tensor.cpp ../view.cpp)
+add_executable(test-cannge-build-lookup test-build-lookup.cpp metadata-stubs.cpp support-stubs.cpp ../graph-build.cpp ../graph-build-view.cpp ../graph-build-io.cpp ../tensor.cpp ../view.cpp)
 target_compile_features(test-cannge-build-lookup PRIVATE cxx_std_17)
 target_include_directories(test-cannge-build-lookup PRIVATE stubs .. ../.. ../../../include)
 add_test(NAME cannge-build-lookup COMMAND test-cannge-build-lookup)

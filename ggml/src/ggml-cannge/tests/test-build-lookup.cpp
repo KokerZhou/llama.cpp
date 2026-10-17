@@ -1,10 +1,15 @@
 #include "graph-build-priv.h"
 #include "tensor.h"
+#include "ggml-impl.h"
+#include "ggml-cannge-impl.h"
 
 #include <cstdio>
 #include <cstdlib>
 
 const char * ggml_type_name(ggml_type) { return "test-type"; }
+// Assembly cases use only external inputs and allocate no plan buffers.
+ggml_cannge_plan::~ggml_cannge_plan() = default;
+bool ggml_cannge_build_node(ggml_cannge_build_context &, ggml_tensor *) { std::abort(); }
 static void check(bool result, const char * message) {
     if (!result) { std::fprintf(stderr, "FAIL: %s\n", message); std::exit(1); }
 }
@@ -89,5 +94,23 @@ int main() {
     check(ggml_cannge_build_tensor(ctx, &scatter) && ctx.tensors[&rows].id != 10000,
           "scatter materializes available rows");
     check(ctx.try_get(nullptr, holder) == result::failure, "null source is a failure");
-    std::puts("PASS: CANNGE optional lookup and build failure propagation");
+    ggml_cannge_plan plan;
+    ggml_cannge_plan_io assembly_io;
+    auto second = tensor();
+    std::strcpy(second.name, "second-output");
+    assembly_io.inputs = { &base, &second };
+    assembly_io.output_tensors = { &base, &second };
+    ggml_cgraph empty_graph{};
+    void * built = nullptr;
+    cannge_es::fail_output_index = 1;
+    check(!ggml_cannge_graph_build(plan, assembly_io, &empty_graph, built, error), "output registration failure aborts assembly");
+    check(built == nullptr && cannge_es::build_calls == 0 && cannge_es::output_calls == 2,
+          "failed second output does not build a partial graph");
+    check(error.find("output[1] second-output: status 17") != std::string::npos,
+          "output failure identifies port, tensor and status");
+    cannge_es::fail_output_index = -1;
+    check(ggml_cannge_graph_build(plan, assembly_io, &empty_graph, built, error), "valid outputs build successfully");
+    check(built != nullptr && cannge_es::build_calls == 1, "successful assembly publishes graph");
+    delete static_cast<ge::Graph *>(built);
+    std::puts("PASS: CANNGE lookup and assembly failure propagation");
 }

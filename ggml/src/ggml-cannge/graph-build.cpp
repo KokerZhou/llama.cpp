@@ -77,7 +77,11 @@ bool ggml_cannge_graph_build(ggml_cannge_plan & plan, ggml_cannge_plan_io & io, 
             if (!ctx.get(io.output_tensors[i], holder)) {
                 return false;
             }
-            cannge_es::EsGraphBuilder::SetOutput(holder, (int64_t) i);
+            const int64_t status = cannge_es::EsGraphBuilder::SetOutput(holder, (int64_t) i);
+            if (status != 0) {
+                return ctx.fail("SetOutput failed for output[" + std::to_string(i) + "] " +
+                                io.output_tensors[i]->name + ": status " + std::to_string(status));
+            }
         }
 
         graph = ctx.builder.BuildAndReset().release();
