@@ -48,6 +48,10 @@ Graph execution captures `ggml_cannge_options` once and passes it to capability 
 
 When adding a graph-affecting option, add its field, environment parsing and signature serialization in `options.h` / `options.cpp`, then consume the field in the predicate or builder. Presence and value remain separate for GQA and dump filters: the GQA predicate validates the mode while its builder uses presence, preserving the existing policy. Diagnostic logging and `GGML_CANNGE_NO_WONCE` remain live controls; `GGML_CANNGE_GRAPH` remains a startup switch. Do not change configuration concurrently with execution.
 
+## Plan analysis
+
+The plan analyzer separates graph indexing, external inputs, boundary outputs, side effects, output-port ordering, layout resolution and memory estimation. The coordinator keeps this order explicit; producer and consumer maps are local to one analysis. The separate debug stage does not change planning decisions.
+
 ## Execution stages
 
 `ggml_backend_cannge_graph_compute` coordinates capability checks and IO analysis, then calls separate stages for plan preparation, input binding, output binding, index snapshots, GE execution and output completion. Verbose IO diagnostics are separate from this orchestration. Operation builders that return failure report the node index, tensor name and operation, even when debug logging is disabled. Missing source tensors return a build error. Tensor lookup and CONT fallback validate view chains before walking them, and share a prefix-slice helper that checks element counts and alignment.
@@ -73,7 +77,7 @@ The execution context owns the GE session and cached plans. Plans own staging al
 SDK-free tests can check support decisions, allocation failure handling, layout copies and deferred-copy lifetimes. Stub compilation checks C++ structure only. A real CANN SDK build, device correctness tests and performance measurements are required before treating changes as hardware-validated.
 
 
-The persistent metadata regression target in `tests/` builds without CANN or GE. It compiles the production `view.cpp` with small ggml metadata stubs; it does not test device execution. From the repository root:
+The persistent metadata regression target in `tests/` builds without CANN or GE. It compiles the production view, plan and options modules with small ggml metadata stubs; it does not test device execution. From the repository root:
 
 ```sh
 cmake -S ggml/src/ggml-cannge/tests -B build-cannge-metadata

@@ -5,20 +5,6 @@
 #include <cstring>
 #include <limits>
 
-// Metadata-only ggml functions keep this test independent of CANN and GE.
-size_t ggml_element_size(const ggml_tensor * t) { return t->type == GGML_TYPE_F16 ? 2 : 4; }
-bool ggml_is_view(const ggml_tensor * t) { return t->view_src != nullptr; }
-int ggml_n_dims(const ggml_tensor * t) {
-    for (int d = GGML_MAX_DIMS - 1; d > 0; d--) {
-        if (t->ne[d] != 1) { return d + 1; }
-    }
-    return 1;
-}
-size_t ggml_nbytes(const ggml_tensor * t) {
-    size_t bytes = ggml_element_size(t);
-    for (int d = 0; d < GGML_MAX_DIMS; d++) { bytes += (t->ne[d] - 1) * t->nb[d]; }
-    return bytes;
-}
 static void check(bool result, const char * description) {
     if (!result) {
         std::fprintf(stderr, "FAIL: %s\n", description);
