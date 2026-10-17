@@ -25,6 +25,7 @@
 // shapes are outermost-first, all conversions go through graph-build.h helpers
 
 #include "mul-mat.h"
+#include "supports.h"
 #include "graph-build.h"
 
 #include "ggml-impl.h"
@@ -74,7 +75,8 @@ bool ggml_cannge_build_matmul(ggml_cannge_build_context & ctx, ggml_tensor * nod
         const std::vector<int64_t> shape = { t->ne[3], t->ne[2], t->ne[1], t->ne[0] };
         return cannge_es::Reshape(h, shape);
     };
-    if (src1->ne[1] == 1 && src1->ne[2] == 1 && src1->ne[3] == 1) {
+    const bool use_gemv = ggml_cannge_use_gemv(src0, src1, ctx.io.options);
+    if (use_gemv && src1->ne[2] == 1 && src1->ne[3] == 1) {
         // M==1 GEMV: y[n] = sum_k w[k,n]*x[k]. f32 casts keep the f32
         // accumulation of ggml-cpu (f16 product+sum loses mantissa);
         // the [K,N] f32 product is HBM-bandwidth-bound, still far
@@ -146,11 +148,7 @@ bool ggml_cannge_build_matmul(ggml_cannge_build_context & ctx, ggml_tensor * nod
         ctx.tensors[node] = sum;
         return true;
     }
-    const bool gqa_ratio = src0->ne[2] != src1->ne[2] && src0->ne[2] > 0 &&
-                           src1->ne[2] % src0->ne[2] == 0;
-    const bool gqa_on    = gqa_ratio && ctx.io.options.gqa_present;
-    if (src1->ne[1] == 1 && ggml_n_dims(src0) >= 2 && src0->ne[3] == src1->ne[3] &&
-        (src0->ne[2] == src1->ne[2] || gqa_on)) {
+    if (use_gemv) {
         // batched M==1 GEMV (classic attention kq/v over heads):
         // (B3,B2,N,K) x (B3,B2,1,K) -> Mul broadcasts, reduce the K
         // axis, keep dims; kept dims are memory-identical to the

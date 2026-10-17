@@ -50,7 +50,7 @@ Use `GGML_CANNGE_DEBUG_COMPILE` to see policy rejections and compilation diagnos
 
 Graph execution captures `ggml_cannge_options` once and passes it to capability checks and IO analysis. The analyzed IO owns that snapshot; builders and the plan signature read it without rereading the environment. Scheduler capability callbacks capture their own current options. Parsed values determine cache identity, so equivalent spellings of a presence flag or integer share a key.
 
-When adding a graph-affecting option, add its field, environment parsing and signature serialization in `options.h` / `options.cpp`, then consume the field in the predicate or builder. Presence and value remain separate for GQA and dump filters: the GQA predicate validates the mode while its builder uses presence, preserving the existing policy. Diagnostic logging and `GGML_CANNGE_NO_WONCE` remain live controls; `GGML_CANNGE_GRAPH` remains a startup switch. Do not change configuration concurrently with execution.
+When adding a graph-affecting option, add its field, environment parsing and signature serialization in `options.h` / `options.cpp`, then consume the field in the predicate or builder. Presence and value remain separate for GQA and dump filters. Matrix-multiplication scheduling and construction share `ggml_cannge_use_gemv`, including head-ratio checks and GQA mode validation. The existing KQ/V classification by contraction width remains a hardware-policy assumption requiring numerical validation. Diagnostic logging and `GGML_CANNGE_NO_WONCE` remain live controls; `GGML_CANNGE_GRAPH` remains a startup switch. Do not change configuration concurrently with execution.
 
 ## Plan analysis
 

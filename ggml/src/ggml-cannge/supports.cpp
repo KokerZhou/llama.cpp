@@ -132,9 +132,9 @@ static bool ggml_cannge_supports_unary(const ggml_tensor * op) {
     }
 }
 
-static bool ggml_cannge_supports_gemv(const ggml_tensor * weights, const ggml_tensor * input,
+bool ggml_cannge_use_gemv(const ggml_tensor * weights, const ggml_tensor * input,
                                       const ggml_cannge_options & options) {
-    if (input->ne[1] != 1 || ggml_n_dims(weights) < 2) {
+    if (weights == nullptr || input == nullptr || input->ne[1] != 1 || ggml_n_dims(weights) < 2) {
         return false;
     }
     if (weights->ne[3] != input->ne[3]) {
@@ -187,7 +187,7 @@ static bool ggml_cannge_supports_matmul(const ggml_tensor * op, const ggml_canng
                 src1 ? (long long) src1->ne[0] : -1, src1 ? (long long) src1->ne[1] : -1,
                 src1 ? (long long) src1->ne[2] : -1, src1 ? (long long) src1->ne[3] : -1);
     }
-    if (ggml_cannge_supports_gemv(src0, src1, options)) {
+    if (ggml_cannge_use_gemv(src0, src1, options)) {
         // huge-N gemvs (the lm head) used to stay on CPU because GE's
         // mul pre-compile rejects one large broadcast (E40021); the
         // build now chunks the weight under the cap and concats

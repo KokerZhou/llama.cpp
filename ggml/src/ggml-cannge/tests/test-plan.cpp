@@ -214,5 +214,37 @@ int main() {
     different_binding = alias_b;
     different_binding.input_base_offset[0] = 4;
     check(second_alias_key != ggml_cannge_plan_signature(&alias_graph.graph, different_binding), "resolved binding offset in key");
+    auto weights = f.tensors[0];
+    auto activation = f.tensors[0];
+    auto product = f.tensors[0];
+    weights.ne[1] = 32; weights.ne[2] = 2;
+    activation.ne[2] = 8;
+    product.op = GGML_OP_MUL_MAT;
+    product.src[0] = &weights; product.src[1] = &activation;
+    for (int64_t contraction : {64, 128}) {
+        weights.ne[0] = activation.ne[0] = contraction;
+        for (const char * mode : {"", "kq", "v", "all", "invalid"}) {
+            options = {};
+            options.gqa_present = true;
+            options.gqa_mode = mode;
+            const bool expected = std::strcmp(mode, "all") == 0 ||
+                                  std::strcmp(mode, contraction == 128 ? "kq" : "v") == 0;
+            check(ggml_cannge_use_gemv(&weights, &activation, options) == expected, "GEMV GQA mode");
+            check(ggml_cannge_supports_op(&product, options) == expected, "scheduler matches GEMV selection");
+            options.gqa_present = false;
+            check(!ggml_cannge_use_gemv(&weights, &activation, options), "GQA requires opt-in");
+        }
+    }
+    options = {}; options.gqa_present = true; options.gqa_mode = "all";
+    activation.ne[2] = 7;
+    check(!ggml_cannge_use_gemv(&weights, &activation, options), "GQA requires integral head ratio");
+    activation.ne[2] = weights.ne[2];
+    options = {};
+    check(ggml_cannge_use_gemv(&weights, &activation, options), "equal heads require no GQA option");
+    activation.ne[3] = 2;
+    check(!ggml_cannge_use_gemv(&weights, &activation, options), "GEMV batch dimensions must match");
+    activation.ne[3] = 1; activation.ne[1] = 2;
+    check(!ggml_cannge_use_gemv(&weights, &activation, options), "matrix input is not GEMV");
+
     std::puts("PASS: CANNGE plan stages and cache binding regressions");
 }
