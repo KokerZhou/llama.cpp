@@ -84,6 +84,8 @@ Temporary output snapshots and converted SET_ROWS rows use blocking transfers. D
 
 ## Validation boundaries
 
+The pending real-device procedure is in [tests/HARDWARE.md](tests/HARDWARE.md).
+
 SDK-free tests can check support decisions, allocation failure handling, layout copies and deferred-copy lifetimes. Stub compilation checks C++ structure only. A real CANN SDK build, device correctness tests and performance measurements are required before treating changes as hardware-validated.
 
 
