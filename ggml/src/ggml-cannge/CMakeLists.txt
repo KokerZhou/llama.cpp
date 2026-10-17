@@ -92,6 +92,7 @@ if (CANN_INSTALL_DIR)
                              rope.cpp
                              rope.h
                              graph.cpp
+                             context.cpp
                              cpy.cpp
                              supports.cpp
                              view.cpp

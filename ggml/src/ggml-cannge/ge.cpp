@@ -162,7 +162,7 @@ bool ggml_cannge_ge_context::load(uint32_t graph_id, void * stream, std::string 
 
 bool ggml_cannge_ge_context::remove(uint32_t graph_id) {
     if (!pimpl->graphs.count(graph_id)) {
-        return false;
+        return true;
     }
     ge::Status ret = pimpl->session->RemoveGraph(graph_id);
     if (ret != ge::SUCCESS) {

@@ -14,3 +14,8 @@ add_executable(test-cannge-plan test-plan.cpp metadata-stubs.cpp ../plan.cpp ../
 target_compile_features(test-cannge-plan PRIVATE cxx_std_17)
 target_include_directories(test-cannge-plan PRIVATE .. ../.. ../../../include)
 add_test(NAME cannge-plan COMMAND test-cannge-plan)
+
+add_executable(test-cannge-lifecycle test-lifecycle.cpp ../context.cpp ../ge.cpp)
+target_compile_features(test-cannge-lifecycle PRIVATE cxx_std_17)
+target_include_directories(test-cannge-lifecycle PRIVATE stubs .. ../.. ../../../include)
+add_test(NAME cannge-lifecycle COMMAND test-cannge-lifecycle)

@@ -7,7 +7,8 @@ The layout follows the sibling CPU/CUDA backends: a backend entry point, shared 
 | File | Responsibility |
 | --- | --- |
 | `ggml-cannge.cpp` | Backend registration, device discovery, buffers, transfers and events |
-| `graph.cpp` | Context and plan lifetime, graph compilation, binding, execution and output completion |
+| `graph.cpp` | Graph compilation, binding, execution and output completion |
+| `context.cpp` | Context and plan lifetime, cache eviction |
 | `supports.cpp` | Scheduling policy and per-operation capability predicates |
 | `options.cpp` / `options.h` | Parsed graph configuration and its cache signature |
 | `cpy.cpp` | Layout conversion, staging allocation and row scatter |
@@ -69,6 +70,8 @@ Backend initialization rejects failed device selection, failed stream creation a
 
 The execution context owns the GE session and cached plans. Plans own staging allocations; per-call IO analysis holds current tensor pointers. Reusable staging assumes that weight contents remain immutable at a given source address.
 
+Eviction retains a plan if stream synchronization or graph removal fails, so a later attempt can retry. A cache miss makes room before building its replacement; failed eviction stops preparation without adding another GE graph. Removing a graph already released by compile rollback succeeds without calling GE again.
+
 `ggml_cannge_check(error, operation, function)` logs the failed operation and returns a boolean. Callers must propagate that result when their interface supports failure; the function does not throw or return from the caller. Cleanup and void backend callbacks still have separate error-handling limitations.
 
 `ggml_cannge_finish_execution` owns temporary output snapshots through copy-back and scatter completion. Transfer failure paths invalidate reusable staging and attempt to drain queued copies before returning. A failed stream synchronization is not proof that queued work completed; device-error recovery needs real-runtime validation.
@@ -78,7 +81,7 @@ The execution context owns the GE session and cached plans. Plans own staging al
 SDK-free tests can check support decisions, allocation failure handling, layout copies and deferred-copy lifetimes. Stub compilation checks C++ structure only. A real CANN SDK build, device correctness tests and performance measurements are required before treating changes as hardware-validated.
 
 
-The persistent metadata regression target in `tests/` builds without CANN or GE. It compiles the production view, plan and options modules with small ggml metadata stubs; it does not test device execution. From the repository root:
+The persistent regression targets in `tests/` build without CANN or GE. Metadata tests compile the production view, plan and options modules with small ggml metadata stubs. Lifecycle tests compile production context and GE wrapper code against fault-injecting ACL/GE stubs, checking eviction retention, removal retries, compile rollback and normal teardown ordering. These tests do not validate SDK compatibility or device execution. From the repository root:
 
 ```sh
 cmake -S ggml/src/ggml-cannge/tests -B build-cannge-metadata

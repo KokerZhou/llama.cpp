@@ -43,9 +43,8 @@ struct ggml_backend_cannge_context {
 
     ~ggml_backend_cannge_context();
 
-    // drop the least recently inserted plan; HBM budget based eviction per D6
-    // keeps the oldest-first policy, the GE graph is removed from the session
-    void evict_oldest_plan();
+    // Retain the oldest plan for retry if synchronization or graph removal fails.
+    bool evict_oldest_plan();
 };
 
 void ggml_backend_cannge_set_device(int32_t device);

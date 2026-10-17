@@ -50,6 +50,7 @@ class ggml_cannge_ge_context {
     // graph is an opaque ge::Graph produced by the graph build step
     bool add_and_compile(void * graph, uint32_t & graph_id, std::string & err);
     bool load(uint32_t graph_id, void * stream, std::string & err);
+    // Success also includes graphs already removed by compile rollback.
     bool remove(uint32_t graph_id);
 
     bool execute(uint32_t graph_id, void * stream, const std::vector<gert::Tensor> & inputs,

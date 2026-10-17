@@ -37,46 +37,6 @@
 #include <fstream>
 #include <limits>
 
-ggml_backend_cannge_context::ggml_backend_cannge_context(int32_t device) : device(device), name(GGML_CANNGE_NAME + std::to_string(device)) {
-    if (!ggml_cannge_check(aclrtSetDevice(device), "aclrtSetDevice", __func__)) {
-        return;
-    }
-    initialized = ggml_cannge_check(aclrtCreateStream(&stream), "aclrtCreateStream", __func__) && stream != nullptr;
-}
-
-ggml_backend_cannge_context::~ggml_backend_cannge_context() {
-    ggml_backend_cannge_set_device(device);
-    // GE teardown order: sync stream, drop session (via ge), then GEFinalize
-    if (stream != nullptr) {
-        ggml_cannge_check(aclrtSynchronizeStream(stream), "aclrtSynchronizeStream", __func__);
-    }
-    ge.reset();
-    plans.clear();
-    if (stream != nullptr) {
-        ggml_cannge_check(aclrtDestroyStream(stream), "aclrtDestroyStream", __func__);
-    }
-}
-
-void ggml_backend_cannge_context::evict_oldest_plan() {
-    auto oldest = plans.end();
-    for (auto it = plans.begin(); it != plans.end(); ++it) {
-        if (oldest == plans.end() || it->second->seq < oldest->second->seq) {
-            oldest = it;
-        }
-    }
-    if (oldest != plans.end()) {
-        // the evicted graph may still have async work on our stream, drain
-        // it before RemoveGraph releases the device-side graph
-        if (stream != nullptr) {
-            ggml_cannge_check(aclrtSynchronizeStream(stream), "aclrtSynchronizeStream", __func__);
-        }
-        if (ge != nullptr && oldest->second->graph_id != 0) {
-            ge->remove(oldest->second->graph_id);
-        }
-        plans.erase(oldest);
-    }
-}
-
 // zero-copy binding of a ggml tensor to a gert::Tensor; the device address is
 // the ggml tensor data pointer (views already include their offset), the
 // storage shape follows the GE outermost-first axis order
@@ -101,24 +61,6 @@ static bool ggml_cannge_bind_tensor(ggml_tensor * t, gert::Tensor & tensor, void
     tensor.SetDataType(dt);
     tensor.SetData(gert::TensorData((uint8_t *) dev_ptr, nullptr, ggml_nbytes(t), gert::TensorPlacement::kOnDeviceHbm));
     return true;
-}
-
-ggml_cannge_plan::~ggml_cannge_plan() {
-    for (void * p : staging) {
-        aclrtFree(p);
-    }
-    for (void * p : input_staging) {
-        aclrtFree(p);
-    }
-    if (in_arena != nullptr) {
-        aclrtFree(in_arena);
-    }
-    if (in_arena_host != nullptr) {
-        aclrtFreeHost(in_arena_host);
-    }
-    if (fa_asl_dev != nullptr) {
-        aclrtFree(fa_asl_dev);
-    }
 }
 
 static ggml_status ggml_cannge_transfer_failed(ggml_backend_cannge_context * ctx, ggml_cannge_plan * plan) {
@@ -275,6 +217,14 @@ static ggml_cannge_plan * ggml_cannge_prepare_plan(ggml_backend_cannge_context *
 
     // compile -> load once per signature, bind + execute on every call
     if (plan == nullptr) {
+        if (ctx->plans.size() >= GGML_CANNGE_MAX_PLANS) {
+            if (!ctx->evict_oldest_plan()) {
+                err = "failed to evict cached graph";
+                GGML_LOG_ERROR("%s: %s\n", __func__, err.c_str());
+                return nullptr;
+            }
+            if (g_dbg_time.on) g_dbg_time.evicts++;
+        }
         if (getenv("GGML_CANNGE_DEBUG_COMPILE")) {
             fprintf(stderr, "[DBG-COMPILE] start nodes=%d first=%s(%s) last=%s(%s) sig=%zu\n", cgraph->n_nodes,
                     cgraph->nodes[0]->name, ggml_op_name(cgraph->nodes[0]->op), cgraph->nodes[cgraph->n_nodes - 1]->name,
@@ -329,10 +279,6 @@ static ggml_cannge_plan * ggml_cannge_prepare_plan(ggml_backend_cannge_context *
             fresh->state = ggml_cannge_plan::COMPILED;
         }
 
-        if (ctx->plans.size() >= GGML_CANNGE_MAX_PLANS) {
-            ctx->evict_oldest_plan();
-            if (g_dbg_time.on) g_dbg_time.evicts++;
-        }
         fresh->seq = ctx->next_plan_seq++;
         plan = fresh.get();
         ctx->plans.emplace(signature, std::move(fresh));
