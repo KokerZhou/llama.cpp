@@ -344,55 +344,44 @@ static bool ggml_cannge_supports_glu(const ggml_tensor * op) {
     }
 }
 
-static bool ggml_cannge_supports_rope(const ggml_tensor * op) {
-    const ggml_tensor * src0 = op->src[0];
-    const ggml_tensor * src1 = op->src[1];
-    // minimal subset: full-head NORMAL/NEOX rotation, no YaRN scaling
-    // (freq_scale/ext/attn/betas at defaults), no freq factors (src2),
-    // no n_offs; cos/sin tables are built inside the graph from src1
-    const struct ggml_tensor * src2 = op->src[2];
-    if (src0 == nullptr || src1 == nullptr || src2 != nullptr || !ggml_cannge_float_dtype(src0->type) ||
-        op->type != src0->type || src1->type != GGML_TYPE_I32) {
-        if (getenv("GGML_CANNGE_DEBUG_COMPILE")) {
-            fprintf(stderr, "[DBG-GATE] rope %s reject-A: src2=%p t0=%d t_op=%d t1=%d\n", op->name,
-                    (const void *) src2, src0 ? (int) src0->type : -1, (int) op->type,
-                    src1 ? (int) src1->type : -1);
-        }
-        return false;
+static const char * ggml_cannge_rope_rejection(const ggml_tensor * op) {
+    const ggml_tensor * data = op->src[0];
+    const ggml_tensor * positions = op->src[1];
+    if (data == nullptr || positions == nullptr) {
+        return "RoPE requires data and position tensors";
+    }
+    if (op->src[2] != nullptr) {
+        return "RoPE frequency factors are unsupported";
+    }
+    if (!ggml_cannge_float_dtype(data->type) || op->type != data->type) {
+        return "RoPE data and output must have matching F16/F32 types";
+    }
+    if (positions->type != GGML_TYPE_I32) {
+        return "RoPE positions must be I32";
     }
     const int n_dims = ggml_get_op_params_i32(op, 1);
-    const int mode   = ggml_get_op_params_i32(op, 2);
-    if ((mode != GGML_ROPE_TYPE_NORMAL && mode != GGML_ROPE_TYPE_NEOX) || n_dims != src0->ne[0] ||
-        n_dims % 2 != 0 || ggml_get_op_params_i32(op, 15) != 0) {
-        if (getenv("GGML_CANNGE_DEBUG_COMPILE")) {
-            fprintf(stderr, "[DBG-GATE] rope %s reject-B: mode=%d n_dims=%d ne0=%lld p15=%d\n", op->name,
-                    mode, n_dims, (long long) src0->ne[0], ggml_get_op_params_i32(op, 15));
-        }
-        return false;
+    const int mode = ggml_get_op_params_i32(op, 2);
+    if (mode != GGML_ROPE_TYPE_NORMAL && mode != GGML_ROPE_TYPE_NEOX) {
+        return "RoPE supports NORMAL and NEOX modes only";
     }
-    // op_params floats: [5]freq_base [6]freq_scale [7]ext_factor
-    // [8]attn_factor [9]beta_fast [10]beta_slow (ggml.c ggml_rope_impl)
-    // beta_fast/beta_slow only steer the YaRN ramp, dead at ext==0
-    // (ggml-cpu rope); Qwen3-2507 ships 32/1 with ext 0. The earlier
-    // model corruption from relaxing this was the SET_ROWS scatter
-    // default-stream race (fixed by draining ctx->stream first, note-40)
-    if (ggml_get_op_params_f32(op, 6) != 1.0f || ggml_get_op_params_f32(op, 7) != 0.0f ||
-        ggml_get_op_params_f32(op, 8) != 1.0f) {
-        if (getenv("GGML_CANNGE_DEBUG_COMPILE")) {
-            fprintf(stderr, "[DBG-GATE] rope %s reject-C: fs=%f ext=%f attn=%f\n", op->name,
-                    ggml_get_op_params_f32(op, 6), ggml_get_op_params_f32(op, 7),
-                    ggml_get_op_params_f32(op, 8));
-        }
-        return false;
+    if (n_dims != data->ne[0] || n_dims % 2 != 0) {
+        return "RoPE requires full-head rotation with an even width";
     }
-    const int nd = ggml_n_dims(src0);
-    const bool ok = nd >= 2 && nd <= 4 && ggml_is_contiguous(src0);
-    if (!ok && getenv("GGML_CANNGE_DEBUG_COMPILE")) {
-        fprintf(stderr, "[DBG-GATE] rope %s rejected: nd=%d ne=%lld,%lld,%lld,%lld nb0=%zu contig=%d\\n",
-                op->name, nd, (long long) src0->ne[0], (long long) src0->ne[1], (long long) src0->ne[2],
-                (long long) src0->ne[3], (size_t) src0->nb[0], (int) ggml_is_contiguous(src0));
+    if (ggml_get_op_params_i32(op, 15) != 0) {
+        return "RoPE offsets are unsupported";
     }
-    return ok;
+    if (ggml_get_op_params_f32(op, 6) != 1.0f) {
+        return "RoPE frequency scaling is unsupported";
+    }
+    // Beta parameters only affect the YaRN ramp when ext_factor is nonzero.
+    if (ggml_get_op_params_f32(op, 7) != 0.0f || ggml_get_op_params_f32(op, 8) != 1.0f) {
+        return "RoPE YaRN scaling is unsupported";
+    }
+    const int rank = ggml_n_dims(data);
+    if (rank < 2 || rank > 4 || !ggml_is_contiguous(data)) {
+        return "RoPE requires contiguous data with rank two through four";
+    }
+    return nullptr;
 }
 
 static const char * ggml_cannge_attention_rejection(const ggml_tensor * op) {
@@ -575,8 +564,10 @@ bool ggml_cannge_supports_op(const ggml_tensor * op, const ggml_cannge_options &
         case GGML_OP_GLU:
             return accept(ggml_cannge_supports_glu(op), "GLU type, activation, split dimensions or swapped mode is unsupported");
 
-        case GGML_OP_ROPE:
-            return accept(ggml_cannge_supports_rope(op), "RoPE type, layout or parameters are unsupported");
+        case GGML_OP_ROPE: {
+            const char * rejection = ggml_cannge_rope_rejection(op);
+            return accept(rejection == nullptr, rejection);
+        }
 
         case GGML_OP_FLASH_ATTN_EXT: {
             const char * rejection = ggml_cannge_attention_rejection(op);

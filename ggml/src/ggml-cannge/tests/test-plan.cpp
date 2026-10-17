@@ -31,7 +31,69 @@ struct fixture {
         graph.nodes = nodes; graph.n_nodes = 2;
     }
 };
+static void test_rope_support() {
+    fixture f;
+    auto data = f.tensors[0];
+    auto positions = f.tensors[0];
+    auto rope = f.tensors[0];
+    data.ne[1] = 2;
+    data.nb[2] = data.nb[3] = 32;
+    positions.type = GGML_TYPE_I32;
+    rope.op = GGML_OP_ROPE;
+    rope.src[0] = &data;
+    rope.src[1] = &positions;
+    rope.op_params[1] = 4;
+    auto set_float = [&](int index, float value) {
+        std::memcpy(rope.op_params + index, &value, sizeof(value));
+    };
+    set_float(6, 1.0f);
+    set_float(8, 1.0f);
+    auto expect = [&](const char * expected) {
+        const char * reason = "stale";
+        check(ggml_cannge_supports_op(&rope, {}, &reason) == (expected == nullptr), "RoPE support outcome");
+        check(expected == nullptr ? reason == nullptr : reason != nullptr && std::strcmp(reason, expected) == 0,
+              "RoPE constraint diagnostic");
+    };
+    for (int mode : {GGML_ROPE_TYPE_NORMAL, GGML_ROPE_TYPE_NEOX}) {
+        rope.op_params[2] = mode;
+        expect(nullptr);
+    }
+    rope.src[0] = nullptr;
+    expect("RoPE requires data and position tensors");
+    rope.src[0] = &data; rope.src[1] = nullptr;
+    expect("RoPE requires data and position tensors");
+    rope.src[1] = &positions; rope.src[2] = &data;
+    expect("RoPE frequency factors are unsupported");
+    rope.src[2] = nullptr; rope.type = GGML_TYPE_F16;
+    expect("RoPE data and output must have matching F16/F32 types");
+    data.type = GGML_TYPE_F16; data.nb[0] = 2; data.nb[1] = 8; data.nb[2] = data.nb[3] = 16;
+    expect(nullptr);
+    positions.type = GGML_TYPE_I64;
+    expect("RoPE positions must be I32");
+    positions.type = GGML_TYPE_I32; rope.op_params[2] = -1;
+    expect("RoPE supports NORMAL and NEOX modes only");
+    rope.op_params[2] = GGML_ROPE_TYPE_NORMAL; rope.op_params[1] = 2;
+    expect("RoPE requires full-head rotation with an even width");
+    data.ne[0] = rope.op_params[1] = 3;
+    expect("RoPE requires full-head rotation with an even width");
+    data.ne[0] = rope.op_params[1] = 4; rope.op_params[15] = 1;
+    expect("RoPE offsets are unsupported");
+    rope.op_params[15] = 0; set_float(6, 0.5f);
+    expect("RoPE frequency scaling is unsupported");
+    set_float(6, 1.0f); set_float(7, 1.0f);
+    expect("RoPE YaRN scaling is unsupported");
+    set_float(7, 0.0f); set_float(8, 0.5f);
+    expect("RoPE YaRN scaling is unsupported");
+    set_float(8, 1.0f); set_float(9, 32.0f); set_float(10, 1.0f);
+    expect(nullptr); // Beta parameters are inactive without YaRN.
+    data.nb[1] *= 2;
+    expect("RoPE requires contiguous data with rank two through four");
+    data.nb[1] /= 2; data.ne[1] = 1;
+    expect("RoPE requires contiguous data with rank two through four");
+}
+
 int main() {
+    test_rope_support();
     fixture f, relocated;
     ggml_cannge_options options;
     std::string err;
