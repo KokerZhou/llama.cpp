@@ -156,15 +156,15 @@ bool ggml_cannge_reserve_input_arena(void *& device, void *& host, size_t & capa
     if (size <= capacity) {
         return true;
     }
-    if (aclrtSynchronizeStream(stream) != ACL_SUCCESS) {
+    if (!ggml_cannge_check(aclrtSynchronizeStream(stream), "input arena synchronization", __func__)) {
         return false;
     }
     void * new_device = nullptr;
     void * new_host = nullptr;
-    if (aclrtMalloc(&new_device, size, ACL_MEM_MALLOC_HUGE_FIRST) != ACL_SUCCESS) {
+    if (!ggml_cannge_check(aclrtMalloc(&new_device, size, ACL_MEM_MALLOC_HUGE_FIRST), "input arena device allocation", __func__)) {
         return false;
     }
-    if (aclrtMallocHost(&new_host, size) != ACL_SUCCESS) {
+    if (!ggml_cannge_check(aclrtMallocHost(&new_host, size), "input arena host allocation", __func__)) {
         ggml_cannge_check(aclrtFree(new_device), "aclrtFree", __func__);
         return false;
     }

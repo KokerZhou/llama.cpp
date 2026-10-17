@@ -5,12 +5,24 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 
 static bool fail_sync = false;
 static int fail_copy = 0;
 static int copy_calls = 0;
 static int async_calls = 0;
 static std::vector<char> events;
+static int fail_async = 0;
+static int fail_alloc = 0;
+static int alloc_calls = 0;
+static std::map<void *, size_t> allocations;
+struct pending_copy {
+    char * dst;
+    const char * src;
+    size_t dpitch, spitch, width, height;
+};
+static std::vector<pending_copy> pending;
+
 
 static void check(bool result, const char * message) {
     if (!result) { std::fprintf(stderr, "FAIL: %s\n", message); std::exit(1); }
@@ -25,7 +37,14 @@ enum ggml_backend_buffer_usage ggml_backend_buffer_get_usage(ggml_backend_buffer
 }
 aclError aclrtSynchronizeStream(aclrtStream) {
     events.push_back('S');
-    return fail_sync ? 1 : ACL_SUCCESS;
+    if (fail_sync) { return 1; }
+    for (const auto & copy : pending) {
+        for (size_t row = 0; row < copy.height; row++) {
+            std::memcpy(copy.dst + row * copy.dpitch, copy.src + row * copy.spitch, copy.width);
+        }
+    }
+    pending.clear();
+    return ACL_SUCCESS;
 }
 aclError aclrtMemcpy(void * dst, size_t capacity, const void * src, size_t size, aclrtMemcpyKind) {
     events.push_back('C');
@@ -35,17 +54,42 @@ aclError aclrtMemcpy(void * dst, size_t capacity, const void * src, size_t size,
     std::memcpy(dst, src, size);
     return ACL_SUCCESS;
 }
-aclError aclrtMemcpyAsync(void *, size_t, const void *, size_t, aclrtMemcpyKind, aclrtStream) {
+aclError aclrtMemcpy2dAsync(void * dst, size_t dpitch, const void * src, size_t spitch,
+                             size_t width, size_t height, aclrtMemcpyKind, aclrtStream) {
     async_calls++;
+    if (async_calls == fail_async) { return 1; }
+    check(width <= dpitch && width <= spitch, "2D pitch covers row");
+    pending.push_back({(char *) dst, (const char *) src, dpitch, spitch, width, height});
     return ACL_SUCCESS;
 }
-aclError aclrtMemcpy2dAsync(void *, size_t, const void *, size_t, size_t, size_t, aclrtMemcpyKind, aclrtStream) {
-    async_calls++;
+aclError aclrtMemcpyAsync(void * dst, size_t capacity, const void * src, size_t size, aclrtMemcpyKind kind, aclrtStream stream) {
+    check(size <= capacity, "async copy capacity");
+    return aclrtMemcpy2dAsync(dst, size, src, size, size, 1, kind, stream);
+}
+aclError aclrtMalloc(void ** ptr, size_t size, int) {
+    alloc_calls++;
+    if (alloc_calls == fail_alloc) { return 1; }
+    *ptr = std::malloc(size);
+    if (*ptr == nullptr) { return 1; }
+    allocations[*ptr] = size;
     return ACL_SUCCESS;
 }
-aclError aclrtMalloc(void ** ptr, size_t size, int) { *ptr = std::malloc(size); return *ptr ? ACL_SUCCESS : 1; }
 aclError aclrtMallocHost(void ** ptr, size_t size) { return aclrtMalloc(ptr, size, 0); }
-aclError aclrtFree(void * ptr) { std::free(ptr); return ACL_SUCCESS; }
+aclError aclrtFree(void * ptr) {
+    if (ptr == nullptr) { return ACL_SUCCESS; }
+    const auto it = allocations.find(ptr);
+    check(it != allocations.end(), "free owned allocation");
+    const uintptr_t begin = (uintptr_t) ptr;
+    auto contains = [&](const void * address) {
+        return (uintptr_t) address >= begin && (uintptr_t) address - begin < it->second;
+    };
+    for (const auto & copy : pending) {
+        check(!contains(copy.src) && !contains(copy.dst), "cannot free allocation referenced by queued copy");
+    }
+    allocations.erase(it);
+    std::free(ptr);
+    return ACL_SUCCESS;
+}
 aclError aclrtFreeHost(void * ptr) { return aclrtFree(ptr); }
 
 static ggml_tensor tensor(ggml_type type, int64_t width, int64_t rows, void * data) {
@@ -57,7 +101,9 @@ static ggml_tensor tensor(ggml_type type, int64_t width, int64_t rows, void * da
     return t;
 }
 static void reset() {
-    fail_sync = false; fail_copy = 0; copy_calls = 0; async_calls = 0; events.clear();
+    check(pending.empty(), "test must drain pending copies");
+    fail_sync = false; fail_copy = 0; fail_async = 0; fail_alloc = 0;
+    copy_calls = 0; async_calls = 0; alloc_calls = 0; events.clear();
 }
 int main() {
     float values[] = {1, 2, 3, 4};
@@ -103,5 +149,65 @@ int main() {
     reset(); fail_copy = 1;
     check(!ggml_cannge_read_snapshot(&src, sizeof(values), nullptr, snapshot), "snapshot copy failure");
     check(async_calls == 0, "failed snapshot leaves no queued destination");
-    std::puts("PASS: CANNGE temporary host copy lifetime and failure propagation");
+    reset();
+    float transposed[] = {1, 2, 3, 4, 5, 6};
+    float dense[6]{};
+    auto view = tensor(GGML_TYPE_F32, 2, 3, transposed);
+    view.nb[0] = 12; view.nb[1] = 4;
+    check(ggml_cannge_strided_copy(&view, dense, false, nullptr), "enqueue strided gather");
+    check(dense[0] == 0 && pending.size() == 3, "strided copies execute only on drain");
+    check(aclrtSynchronizeStream(nullptr) == ACL_SUCCESS, "gather drain");
+    const float gathered[] = {1, 4, 2, 5, 3, 6};
+    check(std::memcmp(dense, gathered, sizeof(dense)) == 0, "gather uses source pitch");
+    for (int i = 0; i < 6; i++) { dense[i] = float((i + 1) * 10); }
+    check(ggml_cannge_strided_copy(&view, dense, true, nullptr), "enqueue strided scatter");
+    check(aclrtSynchronizeStream(nullptr) == ACL_SUCCESS, "scatter drain");
+    const float scattered[] = {10, 30, 50, 20, 40, 60};
+    check(std::memcmp(transposed, scattered, sizeof(transposed)) == 0, "scatter uses destination pitch");
+
+    reset(); fail_async = 2;
+    std::memset(transposed, 0, sizeof(transposed));
+    check(!ggml_cannge_strided_copy(&view, dense, true, nullptr), "partial enqueue failure propagates");
+    check(pending.size() == 1 && transposed[0] == 0, "earlier copy remains pending after enqueue failure");
+    check(aclrtSynchronizeStream(nullptr) == ACL_SUCCESS, "partial scatter drain");
+    check(transposed[0] == 10 && transposed[3] == 20 && transposed[1] == 0, "only accepted copy executes");
+
+    reset();
+    ggml_fp16_t sparse[] = {0, 0, 0x3555, 0, 0};
+    ggml_fp16_t compact[] = {0x3c00, 0x4000, 0x4200, 0x4400};
+    auto half_view = tensor(GGML_TYPE_F16, 2, 2, sparse);
+    half_view.nb[1] = 6; half_view.nb[2] = half_view.nb[3] = 12;
+    check(ggml_cannge_strided_copy(&half_view, compact, true, nullptr), "F16 bounce scatter");
+    check(sparse[0] == compact[0] && sparse[1] == compact[1] &&
+          sparse[3] == compact[2] && sparse[4] == compact[3] && sparse[2] == 0x3555, "bounce preserves holes");
+    reset(); fail_sync = true;
+    compact[0] = 0x4800;
+    check(!ggml_cannge_strided_copy(&half_view, compact, true, nullptr), "bounce drain failure propagates");
+    check(copy_calls == 0 && sparse[0] == 0x3c00, "failed bounce drain leaves destination unchanged");
+
+    reset();
+    void * device = nullptr;
+    void * host = nullptr;
+    size_t capacity = 0;
+    check(ggml_cannge_reserve_input_arena(device, host, capacity, 16, nullptr), "initial arena");
+    void * old_device = device;
+    void * old_host = host;
+    std::memset(host, 7, 16);
+    check(aclrtMemcpyAsync(device, 16, host, 16, ACL_MEMCPY_HOST_TO_DEVICE, nullptr) == ACL_SUCCESS, "pending arena transfer");
+    fail_sync = true;
+    check(!ggml_cannge_reserve_input_arena(device, host, capacity, 32, nullptr), "arena drain failure");
+    check(device == old_device && host == old_host && capacity == 16 && pending.size() == 1, "failed drain preserves pending arena");
+    fail_sync = false; fail_alloc = alloc_calls + 1;
+    check(!ggml_cannge_reserve_input_arena(device, host, capacity, 32, nullptr), "device allocation failure");
+    check(pending.empty() && ((char *) device)[0] == 7, "old transfer completed before growth");
+    check(device == old_device && host == old_host && capacity == 16 && allocations.size() == 2, "device failure preserves arena");
+    fail_alloc = alloc_calls + 2;
+    check(!ggml_cannge_reserve_input_arena(device, host, capacity, 32, nullptr), "host allocation failure");
+    check(device == old_device && host == old_host && capacity == 16 && allocations.size() == 2, "host failure frees candidate and preserves arena");
+    fail_alloc = 0;
+    check(ggml_cannge_reserve_input_arena(device, host, capacity, 32, nullptr), "arena growth succeeds");
+    check(capacity == 32 && allocations.size() == 2 && device != old_device && host != old_host, "arena replacement owns both allocations");
+    aclrtFree(device); aclrtFreeHost(host);
+    check(allocations.empty() && pending.empty(), "no test allocations or transfers left");
+    std::puts("PASS: CANNGE copy lifetime, strided transfer and arena failure regressions");
 }
