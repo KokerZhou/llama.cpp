@@ -178,7 +178,7 @@ static const char * ggml_backend_cannge_get_name(ggml_backend_t backend) {
 
 static void ggml_backend_cannge_free(ggml_backend_t backend) {
     ggml_backend_cannge_context * ctx = (ggml_backend_cannge_context *) backend->context;
-    delete ctx;
+    ggml_cannge_release_context(ctx);
     delete backend;
 }
 
@@ -531,7 +531,7 @@ ggml_backend_t ggml_backend_cannge_init(int32_t device) {
     ggml_backend_cannge_context * ctx = new ggml_backend_cannge_context(device);
     if (!ctx->initialized) {
         GGML_LOG_ERROR("%s: failed to initialize device stream\n", __func__);
-        delete ctx;
+        ggml_cannge_release_context(ctx);
         return nullptr;
     }
 

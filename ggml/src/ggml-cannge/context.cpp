@@ -22,6 +22,8 @@
 
 #include "ggml-cannge-impl.h"
 
+#include <mutex>
+
 ggml_backend_cannge_context::ggml_backend_cannge_context(int32_t device) : device(device), name(GGML_CANNGE_NAME + std::to_string(device)) {
     if (!ggml_cannge_check(aclrtSetDevice(device), "aclrtSetDevice", __func__)) {
         return;
@@ -30,11 +32,7 @@ ggml_backend_cannge_context::ggml_backend_cannge_context(int32_t device) : devic
 }
 
 ggml_backend_cannge_context::~ggml_backend_cannge_context() {
-    ggml_backend_cannge_set_device(device);
-    // GE teardown order: sync stream, drop session (via ge), then GEFinalize
-    if (stream != nullptr) {
-        ggml_cannge_check(aclrtSynchronizeStream(stream), "aclrtSynchronizeStream", __func__);
-    }
+    // release_context has selected the device and drained the stream.
     ge.reset();
     plans.clear();
     if (stream != nullptr) {
@@ -79,5 +77,29 @@ ggml_cannge_plan::~ggml_cannge_plan() {
     }
     if (fa_asl_dev != nullptr) {
         aclrtFree(fa_asl_dev);
+    }
+}
+
+void ggml_cannge_release_context(ggml_backend_cannge_context * ctx) {
+    static std::mutex mutex;
+    // Raw links deliberately retain failed contexts at process exit rather than running unsafe destructors.
+    static ggml_backend_cannge_context * retired = nullptr;
+    std::lock_guard<std::mutex> lock(mutex);
+    if (ctx != nullptr) {
+        ctx->next_retired = retired;
+        retired = ctx;
+    }
+    auto ** link = &retired;
+    while (*link != nullptr) {
+        auto * candidate = *link;
+        if (candidate->stream != nullptr &&
+            (!ggml_cannge_check(aclrtSetDevice(candidate->device), "select retired context device", __func__) ||
+             !ggml_cannge_check(aclrtSynchronizeStream(candidate->stream), "drain retired context", __func__))) {
+            link = &candidate->next_retired;
+            continue;
+        }
+        *link = candidate->next_retired;
+        candidate->next_retired = nullptr;
+        delete candidate;
     }
 }

@@ -6,13 +6,14 @@
 #include <cstdlib>
 
 static bool fail_sync = false;
+static bool fail_device = false;
 static int free_calls = 0;
 
 static void check(bool result, const char * message) {
     if (!result) { std::fprintf(stderr, "FAIL: %s\n", message); std::exit(1); }
 }
 
-aclError aclrtSetDevice(int32_t) { return ACL_SUCCESS; }
+aclError aclrtSetDevice(int32_t) { return fail_device ? 1 : ACL_SUCCESS; }
 aclError aclrtCreateStream(aclrtStream * stream) { *stream = &fail_sync; return ACL_SUCCESS; }
 aclError aclrtSynchronizeStream(aclrtStream) {
     cannge_test::events.push_back("sync");
@@ -44,7 +45,9 @@ static uint32_t add_plan(ggml_backend_cannge_context & ctx, const char * key, ui
 int main() {
     using namespace cannge_test;
     {
-        ggml_backend_cannge_context ctx(0);
+        std::unique_ptr<ggml_backend_cannge_context, decltype(&ggml_cannge_release_context)> owned(
+            new ggml_backend_cannge_context(0), ggml_cannge_release_context);
+        auto & ctx = *owned;
         std::string err;
         ctx.ge.reset(ggml_cannge_ge_context::create(0, err));
         check(ctx.initialized && ctx.ge != nullptr, "context initialization");
@@ -98,5 +101,28 @@ int main() {
         events.clear();
     }
     check(events == std::vector<std::string>({"sync", "session", "finalize", "free"}), "normal teardown ordering");
+    auto * deferred = new ggml_backend_cannge_context(0);
+    std::string err;
+    deferred->ge.reset(ggml_cannge_ge_context::create(0, err));
+    add_plan(*deferred, "deferred", 0, true);
+    const int before_deferred_free = free_calls;
+    events.clear();
+    fail_device = true;
+    ggml_cannge_release_context(deferred);
+    check(events.empty() && free_calls == before_deferred_free && !graphs.empty(), "device failure retains context");
+    fail_device = false;
+    fail_sync = true;
+    ggml_cannge_release_context(nullptr);
+    check(events == std::vector<std::string>{"sync"} && free_calls == before_deferred_free && !graphs.empty(),
+          "shutdown drain failure retains session and buffers");
+    // A separate backend can be released while the retired context waits.
+    auto * unrelated = new ggml_backend_cannge_context(0);
+    fail_sync = false;
+    events.clear();
+    ggml_cannge_release_context(unrelated);
+    check(graphs.empty() && free_calls == before_deferred_free + 1, "later release reclaims retired resources");
+    events.clear();
+    ggml_cannge_release_context(nullptr);
+    check(events.empty(), "retired context is released only once");
     std::puts("PASS: CANNGE eviction and graph rollback failure recovery");
 }

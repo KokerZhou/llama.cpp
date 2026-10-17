@@ -42,7 +42,9 @@ The dependency flow is `ggml-cannge.cpp -> graph.cpp -> graph-build.cpp -> ops.c
 4. Alias restrictions are checked.
 5. A named operation predicate checks the supported types, shapes and parameters.
 
-The existing environment-variable behavior is preserved. Most disable flags test presence: setting one to `0` still disables the operation. `GGML_CANNGE_FA` also tests presence. `GGML_CANNGE_GQA` accepts `kq`, `v` or `all` in the capability check. Shape-specific workarounds remain beside the relevant predicate. The optional reason output of `ggml_cannge_supports_op` identifies the disabling option or failed constraint category; it is null on success. Scheduler diagnostics log rejections under `GGML_CANNGE_DEBUG_COMPILE`, while execution pre-check failures always report the tensor name, operation and reason.
+Most existing environment-variable behavior is preserved. Most disable flags test presence: setting one to `0` still disables the operation. `GGML_CANNGE_FA` also tests presence. `GGML_CANNGE_GQA` accepts `kq`, `v` or `all` in the capability check. Shape-specific workarounds remain beside the relevant predicate. The optional reason output of `ggml_cannge_supports_op` identifies the disabling option or failed constraint category; it is null on success. Scheduler diagnostics log rejections under `GGML_CANNGE_DEBUG_COMPILE`, while execution pre-check failures always report the tensor name, operation and reason.
+
+For non-contiguous CONT, `GGML_CANNGE_NO_CONT_NC` overrides `GGML_CANNGE_CONT_NC`. Scheduling, merged-cache planning and graph construction share this effective policy. Dense CONT remains available with either flag, but all CONT operations must preserve element count. The merged-attention opt-in still requires device validation; consistent policy does not resolve its historical model-scale numerical issues.
 
 Use `GGML_CANNGE_DEBUG_COMPILE` to see policy rejections and compilation diagnostics, `GGML_CANNGE_DEBUG_BUILD` for graph mapping, `GGML_CANNGE_DEBUG_IO` for transfer checksums, and `GGML_CANNGE_DEBUG_TIMING` for timing totals. These diagnostics can synchronize or copy device data and are unsuitable for performance measurements.
 
@@ -72,9 +74,11 @@ The execution context owns the GE session and cached plans. Plans own staging al
 
 Eviction retains a plan if stream synchronization or graph removal fails, so a later attempt can retry. A cache miss makes room before building its replacement; failed eviction stops preparation without adding another GE graph. Removing a graph already released by compile rollback succeeds without calling GE again.
 
+Backend release selects the context's device and drains its stream before destruction. Failed contexts remain on a mutex-protected retired list, retaining their session and staging buffers. Later backend releases retry them. If no later drain succeeds, these resources remain allocated until process exit; this path does not reset the device or claim recovery from a permanent device failure. Context destruction is private so callers cannot bypass this release path.
+
 `ggml_cannge_check(error, operation, function)` logs the failed operation and returns a boolean. Callers must propagate that result when their interface supports failure; the function does not throw or return from the caller. Cleanup and void backend callbacks still have separate error-handling limitations.
 
-Temporary output snapshots and converted SET_ROWS rows use blocking transfers. Device snapshots drain the producer stream before reading; device scatter drains it before uploading rows. No asynchronous transfer retains these temporary host buffers after a failure. This changes host-scatter scheduling and needs device performance measurements. Transfers between persistent tensor/staging buffers remain asynchronous; failure paths invalidate reusable staging and attempt to drain queued copies before returning. A failed stream synchronization is not proof that queued work completed; device-error recovery and final context destruction still need real-runtime validation.
+Temporary output snapshots and converted SET_ROWS rows use blocking transfers. Device snapshots drain the producer stream before reading; device scatter drains it before uploading rows. No asynchronous transfer retains these temporary host buffers after a failure. This changes host-scatter scheduling and needs device performance measurements. Transfers between persistent tensor/staging buffers remain asynchronous; failure paths invalidate reusable staging and attempt to drain queued copies before returning. A failed stream synchronization is not proof that queued work completed; device-error recovery and deferred context release still need real-runtime validation.
 
 ## Validation boundaries
 

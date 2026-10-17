@@ -41,10 +41,18 @@ struct ggml_backend_cannge_context {
 
     ggml_backend_cannge_context(int32_t device);
 
-    ~ggml_backend_cannge_context();
-
     // Retain the oldest plan for retry if synchronization or graph removal fails.
     bool evict_oldest_plan();
+
+  private:
+    // Linked only after the backend relinquishes this context.
+    ggml_backend_cannge_context * next_retired = nullptr;
+
+    ~ggml_backend_cannge_context();
+    friend void ggml_cannge_release_context(ggml_backend_cannge_context * ctx);
 };
 
 void ggml_backend_cannge_set_device(int32_t device);
+
+// Retain failed drains and retry them on subsequent calls. Null retries without retiring a context.
+void ggml_cannge_release_context(ggml_backend_cannge_context * ctx);
