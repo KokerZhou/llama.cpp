@@ -56,6 +56,8 @@ struct ggml_cannge_build_context {
         return false;
     }
 
+    // Optional lookup preserves errors for absent tensors, but reports reconstruction failures.
+    ggml_cannge_build_result try_get(ggml_tensor * t, cannge_es::EsTensorHolder & holder);
     bool get(ggml_tensor * t, cannge_es::EsTensorHolder & holder);
 };
 

@@ -222,18 +222,20 @@ bool ggml_cannge_build_tensor(ggml_cannge_build_context & ctx, ggml_tensor * nod
             // broadcast zero to force a private materialization for the port.
             if (src0 != nullptr && ctx.io.options.scatter_add_zero) {
                 cannge_es::EsTensorHolder datah;
-                if (ctx.get(src0, datah)) {
-                    ge::DataType dt0;
-                    if (ggml_cannge_ge_dtype(src0->type, dt0)) {
-                        ge::DataType f32d;
-                        if (ggml_cannge_ge_dtype(GGML_TYPE_F32, f32d)) {
-                            auto zc = ctx.builder.CreateConst(std::vector<float>{ 0.0f }, std::vector<int64_t>{ 1, 1 });
-                            if (src0->type != GGML_TYPE_F32) {
-                                zc = cannge_es::Cast(zc, (int64_t) dt0);
-                            }
-                            ctx.tensors[src0] = cannge_es::Add(datah, zc);
-                        }
+                const auto lookup = ctx.try_get(src0, datah);
+                if (lookup == ggml_cannge_build_result::failure) {
+                    return false;
+                }
+                if (lookup == ggml_cannge_build_result::success) {
+                    ge::DataType dtype;
+                    if (!ggml_cannge_ge_dtype(src0->type, dtype)) {
+                        return ctx.fail("unsupported scatter materialization dtype");
                     }
+                    auto zero = ctx.builder.CreateConst(std::vector<float>{ 0.0f }, std::vector<int64_t>{ 1, 1 });
+                    if (src0->type != GGML_TYPE_F32) {
+                        zero = cannge_es::Cast(zero, (int64_t) dtype);
+                    }
+                    ctx.tensors[src0] = cannge_es::Add(datah, zero);
                 }
             }
             return true;

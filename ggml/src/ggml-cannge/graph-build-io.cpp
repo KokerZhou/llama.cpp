@@ -80,7 +80,11 @@ static ggml_cannge_build_result ggml_cannge_build_cont_chain_impl(ggml_cannge_bu
     // PERMUTE/TRANSPOSE cases carry the correct byte semantics); the view_src
     // walk below is only the cross-fragment fallback, and ggml flattens view
     // chains so the walk cannot be trusted to replay the ops
-    if (ctx.get(v, h)) {
+    const auto source = ctx.try_get(v, h);
+    if (source == ggml_cannge_build_result::failure) {
+        return source;
+    }
+    if (source == ggml_cannge_build_result::success) {
         return ggml_cannge_splice_fresh_row(ctx, t, v, h) ? ggml_cannge_build_result::success : ggml_cannge_build_result::failure;
     }
     if (!ggml_cannge_is_rearrange_view(v)) {
@@ -144,15 +148,19 @@ static bool ggml_cannge_splice_fresh_row(ggml_cannge_build_context & ctx, ggml_t
         return true;
     }
     cannge_es::EsTensorHolder rowh, idxh;
-    if (!ctx.get(sr->data, rowh) || !ctx.get(sr->idx, idxh)) {
-        if (getenv("GGML_CANNGE_DEBUG_BUILD")) {
-            fprintf(stderr, "[DBG-SPLICE] cont-side row/idx holder miss data=%s idx=%s\n",
-                    sr->data->name, sr->idx->name);
-        }
-        return true; // row not produced in this fragment: plain (stale-slot)
-                     // chain only happens when no sibling exists at all; with a
-                     // sibling but no in-fragment row this consumer reads the
-                     // cache input, matching the pre-merge semantics
+    const auto row = ctx.try_get(sr->data, rowh);
+    if (row == ggml_cannge_build_result::failure) {
+        return false;
+    }
+    if (row == ggml_cannge_build_result::not_applicable) {
+        return true;
+    }
+    const auto index = ctx.try_get(sr->idx, idxh);
+    if (index == ggml_cannge_build_result::failure) {
+        return false;
+    }
+    if (index == ggml_cannge_build_result::not_applicable) {
+        return true;
     }
     ge::DataType f32, dt;
     if (!ggml_cannge_ge_dtype(GGML_TYPE_F32, f32) || !ggml_cannge_ge_dtype(t->type, dt)) {

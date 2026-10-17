@@ -207,9 +207,10 @@ bool ggml_cannge_build_view(ggml_cannge_build_context & ctx, ggml_tensor * node)
     return true;
 }
 
-bool ggml_cannge_build_context::get(ggml_tensor * t, cannge_es::EsTensorHolder & holder) {
+ggml_cannge_build_result ggml_cannge_build_context::try_get(ggml_tensor * t, cannge_es::EsTensorHolder & holder) {
     if (t == nullptr) {
-        return fail("missing source tensor");
+        fail("missing source tensor");
+        return ggml_cannge_build_result::failure;
     }
     auto it = tensors.find(t);
     if (it == tensors.end()) {
@@ -219,10 +220,10 @@ bool ggml_cannge_build_context::get(ggml_tensor * t, cannge_es::EsTensorHolder &
             const auto result = ggml_cannge_build_cont_chain(*this, t, holder);
             if (result == ggml_cannge_build_result::success) {
                 tensors[t] = holder;
-                return true;
+                return ggml_cannge_build_result::success;
             }
             if (result == ggml_cannge_build_result::failure) {
-                return false;
+                return ggml_cannge_build_result::failure;
             }
         }
         // rearrange-view input substituted by its base (plan.cpp): rebuild
@@ -230,7 +231,8 @@ bool ggml_cannge_build_context::get(ggml_tensor * t, cannge_es::EsTensorHolder &
         if (t->view_src != nullptr) {
             ggml_cannge_view_info info;
             if (!ggml_cannge_resolve_view(t, info)) {
-                return fail("invalid view chain for " + std::string(t->name));
+                fail("invalid view chain for " + std::string(t->name));
+                return ggml_cannge_build_result::failure;
             }
             std::vector<ggml_tensor *> chain;
             ggml_tensor *              base = t;
@@ -242,16 +244,16 @@ bool ggml_cannge_build_context::get(ggml_tensor * t, cannge_es::EsTensorHolder &
             if (bit != tensors.end()) {
                 cannge_es::EsTensorHolder h = bit->second;
                 if (!ggml_cannge_build_view_prefix(*this, t, base, h)) {
-                    return false;
+                    return ggml_cannge_build_result::failure;
                 }
                 for (auto rit = chain.rbegin(); rit != chain.rend(); ++rit) {
                     if (!ggml_cannge_build_relabel(*rit, h, err)) {
-                        return false;
+                        return ggml_cannge_build_result::failure;
                     }
                 }
                 tensors[t] = h;
                 holder     = h;
-                return true;
+                return ggml_cannge_build_result::success;
             }
         }
         if (getenv("GGML_CANNGE_DEBUG_BUILD")) {
@@ -261,8 +263,16 @@ bool ggml_cannge_build_context::get(ggml_tensor * t, cannge_es::EsTensorHolder &
                     (long long) t->ne[2], (long long) t->ne[3], (long long) t->nb[0], (long long) t->nb[1],
                     (long long) t->nb[2], (long long) t->nb[3]);
         }
-        return fail("no ES tensor for " + std::string(t->name));
+        return ggml_cannge_build_result::not_applicable;
     }
     holder = it->second;
-    return true;
+    return ggml_cannge_build_result::success;
+}
+
+bool ggml_cannge_build_context::get(ggml_tensor * t, cannge_es::EsTensorHolder & holder) {
+    const auto result = try_get(t, holder);
+    if (result == ggml_cannge_build_result::not_applicable) {
+        return fail("no ES tensor for " + std::string(t->name));
+    }
+    return result == ggml_cannge_build_result::success;
 }
