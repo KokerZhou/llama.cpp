@@ -54,6 +54,13 @@ static bool ggml_cannge_can_scatter_in_graph(const ggml_tensor * node) {
         (idx->type != GGML_TYPE_I32 && idx->type != GGML_TYPE_I64)) {
         return false;
     }
+    // The builder registers its result under the destination base as well as the node.
+    // A partial or reshaped view cannot replace that base holder.
+    ggml_cannge_view_info destination;
+    if (!ggml_cannge_resolve_view(dst, destination) || destination.offset != 0 ||
+        !ggml_are_same_shape(dst, destination.base)) {
+        return false;
+    }
     return ggml_n_dims(dst) == 2 && data->ne[0] == dst->ne[0] && data->ne[1] == idx->ne[0] &&
            data->ne[0] > 0 && idx->ne[0] > 0 && data->ne[2] == 1 && data->ne[3] == 1 &&
            idx->ne[1] == 1 && idx->ne[2] == 1 && idx->ne[3] == 1;

@@ -109,6 +109,35 @@ int main() {
         scatter.tensors[0].ne[dimension] = scatter.tensors[1].ne[dimension] = scatter.tensors[2].ne[dimension] = 1;
     }
 
+    auto cache_base = scatter.tensors[0];
+    scatter.tensors[0].view_src = &cache_base;
+    scatter.tensors[1].src[0] = &cache_base;
+    for (bool merged_scatter : {false, true}) {
+        options = {};
+        options.scatter = !merged_scatter;
+        options.contiguous_views = merged_scatter;
+        auto expect_scatter = [&](bool in_graph, const char * message) {
+            ggml_cannge_plan_io selected;
+            check(ggml_cannge_plan_analyze(&scatter.graph, selected, err, options), "cache view scatter analysis");
+            check(selected.set_rows[0].in_graph == in_graph, message);
+        };
+        // A whole-base alias is safe for both paths. The merged path requires the base as an input.
+        scatter.tensors[0].view_src = nullptr;
+        expect_scatter(true, "whole cache supports in-graph scatter");
+        scatter.tensors[0].view_src = &cache_base;
+        expect_scatter(true, "whole-base alias supports in-graph scatter");
+        cache_base.ne[1] = 16;
+        cache_base.nb[2] = cache_base.nb[3] = 256;
+        expect_scatter(false, "partial cache cannot replace full base holder");
+        scatter.tensors[0].view_offs = 16;
+        expect_scatter(false, "offset cache cannot replace full base holder");
+        scatter.tensors[0].view_offs = 0;
+        cache_base.ne[1] = 8;
+        cache_base.nb[2] = cache_base.nb[3] = 128;
+    }
+    scatter.tensors[0].view_src = nullptr;
+    scatter.tensors[1].src[0] = &scatter.tensors[0];
+
     // The disable switch must override the opt-in in scheduling and side-effect planning.
     auto cont_source = scatter.tensors[0];
     cont_source.ne[0] = 2; cont_source.ne[1] = 2;
