@@ -15,6 +15,11 @@ target_compile_features(test-cannge-plan PRIVATE cxx_std_17)
 target_include_directories(test-cannge-plan PRIVATE stubs .. ../.. ../../../include)
 add_test(NAME cannge-plan COMMAND test-cannge-plan)
 
+add_executable(test-cannge-supports test-supports.cpp metadata-stubs.cpp support-stubs.cpp ../supports.cpp ../options.cpp)
+target_compile_features(test-cannge-supports PRIVATE cxx_std_17)
+target_include_directories(test-cannge-supports PRIVATE stubs .. ../.. ../../../include)
+add_test(NAME cannge-supports COMMAND test-cannge-supports)
+
 add_executable(test-cannge-lifecycle test-lifecycle.cpp ../context.cpp ../ge.cpp)
 target_compile_features(test-cannge-lifecycle PRIVATE cxx_std_17)
 target_include_directories(test-cannge-lifecycle PRIVATE stubs .. ../.. ../../../include)
