@@ -72,5 +72,21 @@ int main() {
     check(ggml_cannge_resolve_view_base(&view, {&base}, offset) == nullptr, "footprint overflow");
     view.ne[0] = 0;
     check(ggml_cannge_resolve_view_base(&view, {&base}, offset) == nullptr, "zero footprint");
+    int64_t outer = -1;
+    auto prefix = tensor(storage, 4, 2);
+    check(ggml_cannge_view_prefix_extent(&prefix, &base, outer) && outer == 2, "aligned prefix extent");
+    check(ggml_cannge_view_prefix_extent(&base, &base, outer) && outer == 8, "full prefix extent");
+    prefix.ne[1] = 9;
+    check(!ggml_cannge_view_prefix_extent(&prefix, &base, outer) && outer == 0, "oversized prefix rejected");
+    prefix.ne[0] = 3; prefix.ne[1] = 1;
+    check(!ggml_cannge_view_prefix_extent(&prefix, &base, outer), "unaligned prefix rejected");
+    prefix.ne[0] = 0;
+    check(!ggml_cannge_view_prefix_extent(&prefix, &base, outer), "empty prefix rejected");
+    prefix.ne[0] = std::numeric_limits<int64_t>::max(); prefix.ne[1] = 2;
+    check(!ggml_cannge_view_prefix_extent(&prefix, &base, outer), "prefix element overflow");
+    check(!ggml_cannge_view_prefix_extent(&base, &prefix, outer), "base element overflow");
+    check(!ggml_cannge_view_prefix_extent(nullptr, &base, outer), "missing prefix");
+    auto vector = tensor(storage, 8); prefix = tensor(storage, 3);
+    check(ggml_cannge_view_prefix_extent(&prefix, &vector, outer) && outer == 3, "one-dimensional prefix");
     std::puts("PASS: CANNGE view metadata regressions");
 }

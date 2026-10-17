@@ -112,6 +112,17 @@ class ggml_cannge_plan_analysis {
         }
     }
 
+    static ggml_tensor * rearranged_input_base(ggml_tensor * tensor, ggml_tensor * view) {
+        ggml_cannge_view_info info;
+        int64_t outer;
+        if (ggml_cannge_resolve_view(view, info) && !info.is_dense && info.offset == 0 &&
+            ggml_cannge_is_rearrange_view(view) && ggml_is_contiguous(info.base) &&
+            ggml_cannge_view_prefix_extent(tensor, info.base, outer)) {
+            return info.base;
+        }
+        return nullptr;
+    }
+
     void collect_inputs() {
         // external inputs: referenced as src but never produced inside the graph
         // (leafs with op GGML_OP_NONE fall in here naturally), in first reference
@@ -145,58 +156,18 @@ class ggml_cannge_plan_analysis {
                     io.fa_mask = src;
                 }
                 if (!ggml_is_empty(src) && !produced.count(src) && !seen_input.count(src)) {
-                    // non-dense rearrange view of a dense base (PERMUTE/TRANSPOSE
-                    // of the KV cache): register the BASE as the input and let the
-                    // build reconstruct the relabel chain in-GE. Binds the dense
-                    // buffer directly and skips the strided staging bounce with
-                    // its host round-trip and stream drain (note-48).
-                    // CONT of a rearrange view (the V cache transpose): the dense
-                    // cont bytes already live in the base buffer - bind the base
-                    // (batch R: kills the 1MB/layer H2D staging in the split
-                    // config too; the in-GE relabel reads the post-scatter cache)
+                    ggml_tensor * base = nullptr;
                     if (src->op == GGML_OP_CONT && src->src[0] != nullptr && src->src[0]->view_src != nullptr) {
-                        ggml_tensor *            v = src->src[0];
-                        ggml_cannge_view_info    vinfo;
-                        if (ggml_cannge_resolve_view(v, vinfo) && !vinfo.is_dense && vinfo.offset == 0 &&
-                            ggml_cannge_is_rearrange_view(v) && ggml_is_contiguous(vinfo.base)) {
-                            const int64_t b_nd = ggml_n_dims(vinfo.base);
-                            const int64_t t_el = ggml_nelements(src);
-                            const int64_t b_el = ggml_nelements(vinfo.base);
-                            int64_t       inner = 1;
-                            for (int64_t k = 0; k + 1 < b_nd; k++) {
-                                inner *= vinfo.base->ne[k];
-                            }
-                            if (t_el <= b_el && (b_nd < 2 || (inner > 0 && t_el % inner == 0))) {
-                                seen_input[src] = true;
-                                src = vinfo.base;
-                                if (seen_input.count(src)) {
-                                    continue;
-                                }
-                            }
-                        }
+                        base = rearranged_input_base(src, src->src[0]);
                     }
-                    if (src->view_src != nullptr) {
-                        ggml_cannge_view_info vinfo;
-                        if (ggml_cannge_resolve_view(src, vinfo) && !vinfo.is_dense && vinfo.offset == 0 &&
-                            ggml_cannge_is_rearrange_view(src) && ggml_is_contiguous(vinfo.base)) {
-                            // the build reconstructs the relabel in-GE with a
-                            // linear prefix slice on the base: the view span must
-                            // align to the base's inner extent (KV cache views
-                            // span a slot prefix of the context buffer)
-                            const int64_t  b_nd = ggml_n_dims(vinfo.base);
-                            const int64_t  t_el = ggml_nelements(src);
-                            const int64_t  b_el = ggml_nelements(vinfo.base);
-                            int64_t        inner = 1;
-                            for (int64_t k = 0; k + 1 < b_nd; k++) {
-                                inner *= vinfo.base->ne[k];
-                            }
-                            if (t_el <= b_el && (b_nd < 2 || (inner > 0 && t_el % inner == 0))) {
-                                seen_input[src] = true;
-                                src = vinfo.base;
-                                if (seen_input.count(src)) {
-                                    continue;
-                                }
-                            }
+                    if (base == nullptr && src->view_src != nullptr) {
+                        base = rearranged_input_base(src, src);
+                    }
+                    if (base != nullptr) {
+                        seen_input[src] = true;
+                        src = base;
+                        if (seen_input.count(src)) {
+                            continue;
                         }
                     }
                     seen_input[src] = true;

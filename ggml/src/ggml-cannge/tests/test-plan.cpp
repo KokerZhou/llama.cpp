@@ -87,6 +87,32 @@ int main() {
     check(ggml_cannge_plan_analyze(&scatter.graph, merged, err, options), "merged cache analysis");
     check(merged.set_rows[0].in_graph && merged.output_tensors.size() == 1, "merged cache output deduplicated");
 
+    fixture views;
+    auto & cache = views.tensors[0];
+    cache.ne[1] = 4; cache.nb[2] = cache.nb[3] = 64;
+    auto & transpose = views.tensors[1];
+    transpose.op = GGML_OP_TRANSPOSE; transpose.view_src = &cache;
+    transpose.ne[0] = 2; transpose.ne[1] = 4;
+    transpose.nb[0] = 16; transpose.nb[1] = 4;
+    views.graph.nodes = &views.nodes[1]; views.graph.n_nodes = 1;
+    ggml_cannge_plan_io rearranged;
+    options = {};
+    check(ggml_cannge_plan_analyze(&views.graph, rearranged, err, options), "rearranged view analysis");
+    check(rearranged.inputs == std::vector<ggml_tensor *>{&cache}, "view binds dense base");
+    check(!rearranged.input_staged[0], "base avoids staging");
+    auto & cont = views.tensors[3];
+    cont.op = GGML_OP_CONT; cont.src[0] = &transpose;
+    cont.ne[0] = 2; cont.ne[1] = 4;
+    views.tensors[2].src[0] = &cont;
+    ggml_cannge_plan_io contiguous;
+    check(ggml_cannge_plan_analyze(&views.graph, contiguous, err, options), "CONT view analysis");
+    check(contiguous.inputs == std::vector<ggml_tensor *>{&cache}, "CONT binds same base");
+    views.tensors[2].src[0] = &transpose;
+    transpose.ne[0] = 3; transpose.ne[1] = 1;
+    ggml_cannge_plan_io unaligned;
+    check(ggml_cannge_plan_analyze(&views.graph, unaligned, err, options), "unaligned view analysis");
+    check(unaligned.inputs == std::vector<ggml_tensor *>{&transpose} && unaligned.input_staged[0], "unaligned view keeps staging fallback");
+
     fixture broken;
     broken.tensors[0].view_src = &broken.tensors[0];
     ggml_cannge_plan_io invalid;

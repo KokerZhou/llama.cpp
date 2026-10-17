@@ -54,7 +54,7 @@ The plan analyzer separates graph indexing, external inputs, boundary outputs, s
 
 ## Execution stages
 
-`ggml_backend_cannge_graph_compute` coordinates capability checks and IO analysis, then calls separate stages for plan preparation, input binding, output binding, index snapshots, GE execution and output completion. Verbose IO diagnostics are separate from this orchestration. Operation builders that return failure report the node index, tensor name and operation, even when debug logging is disabled. Missing source tensors return a build error. Tensor lookup and CONT fallback validate view chains before walking them, and share a prefix-slice helper that checks element counts and alignment.
+`ggml_backend_cannge_graph_compute` coordinates capability checks and IO analysis, then calls separate stages for plan preparation, input binding, output binding, index snapshots, GE execution and output completion. Verbose IO diagnostics are separate from this orchestration. Operation builders that return failure report the node index, tensor name and operation, even when debug logging is disabled. Missing source tensors return a build error. Tensor lookup and CONT fallback validate view chains before walking them, and share a prefix-slice helper with input planning. The metadata rule checks positive element counts, overflow, alignment and that the prefix fits within its base. Exact-size views keep their holder; oversized views fail construction.
 
 Plan preparation includes cache lookup, compilation and loading. Timing totals therefore include loading in `lookup`, rather than `bind`. Input-binding timestamps retain the distinction between staging and its synchronization.
 

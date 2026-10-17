@@ -212,3 +212,36 @@ ggml_tensor * ggml_cannge_resolve_view_base(ggml_tensor * node, const std::set<g
 
     return nullptr;
 }
+
+static bool ggml_cannge_view_elements(const ggml_tensor * tensor, int64_t & elements) {
+    elements = 1;
+    if (tensor == nullptr) {
+        return false;
+    }
+    for (int d = 0; d < GGML_MAX_DIMS; d++) {
+        if (tensor->ne[d] <= 0 || elements > std::numeric_limits<int64_t>::max() / tensor->ne[d]) {
+            return false;
+        }
+        elements *= tensor->ne[d];
+    }
+    return true;
+}
+
+bool ggml_cannge_view_prefix_extent(const ggml_tensor * tensor, const ggml_tensor * base, int64_t & outer) {
+    outer = 0;
+    int64_t elements;
+    int64_t base_elements;
+    if (!ggml_cannge_view_elements(tensor, elements) || !ggml_cannge_view_elements(base, base_elements) ||
+        elements > base_elements) {
+        return false;
+    }
+    int64_t inner = 1;
+    for (int d = 0; d + 1 < ggml_n_dims(base); d++) {
+        inner *= base->ne[d]; // The checked base element count bounds this product.
+    }
+    if (elements % inner != 0) {
+        return false;
+    }
+    outer = elements / inner;
+    return true;
+}

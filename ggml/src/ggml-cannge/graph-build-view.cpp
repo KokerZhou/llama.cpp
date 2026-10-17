@@ -1,43 +1,20 @@
 #include "graph-build-priv.h"
 
-#include <limits>
 #include <utility>
-
-static bool ggml_cannge_view_elements(const ggml_tensor * tensor, int64_t & elements) {
-    elements = 1;
-    for (int d = 0; d < GGML_MAX_DIMS; d++) {
-        if (tensor->ne[d] <= 0 || elements > std::numeric_limits<int64_t>::max() / tensor->ne[d]) {
-            return false;
-        }
-        elements *= tensor->ne[d];
-    }
-    return true;
-}
 
 bool ggml_cannge_build_view_prefix(ggml_cannge_build_context & ctx, const ggml_tensor * tensor,
                                    const ggml_tensor * base, cannge_es::EsTensorHolder & holder) {
-    int64_t elements;
-    int64_t base_elements;
-    if (!ggml_cannge_view_elements(tensor, elements) || !ggml_cannge_view_elements(base, base_elements)) {
-        return ctx.fail("invalid element count for view prefix " + std::string(tensor->name));
-    }
-    if (elements >= base_elements) {
-        return true;
+    int64_t outer;
+    if (!ggml_cannge_view_prefix_extent(tensor, base, outer)) {
+        return ctx.fail("invalid or unaligned view prefix " + std::string(tensor->name));
     }
     const std::vector<int64_t> shape = ggml_cannge_ge_shape(base);
-    int64_t inner = 1;
-    for (size_t i = 1; i < shape.size(); i++) {
-        if (shape[i] <= 0 || inner > std::numeric_limits<int64_t>::max() / shape[i]) {
-            return ctx.fail("invalid base shape for view prefix " + std::string(tensor->name));
-        }
-        inner *= shape[i];
-    }
-    if (elements <= 0 || elements % inner != 0) {
-        return ctx.fail("view prefix does not align to base " + std::string(tensor->name));
+    if (outer == shape[0]) {
+        return true;
     }
     std::vector<int64_t> offsets(shape.size(), 0);
     std::vector<int64_t> sizes = shape;
-    sizes[0] = elements / inner;
+    sizes[0] = outer;
     holder = cannge_es::Slice(holder, offsets, sizes);
     return true;
 }

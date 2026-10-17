@@ -21,3 +21,6 @@ bool ggml_cannge_resolve_view(ggml_tensor * t, ggml_cannge_view_info & info);
 ggml_tensor * ggml_cannge_resolve_view_base(ggml_tensor * node, const std::set<ggml_tensor *> & registered, size_t & offset);
 
 bool ggml_cannge_is_rearrange_view(const ggml_tensor * tensor);
+
+// Return the outer extent of a positive, aligned prefix no larger than its base.
+bool ggml_cannge_view_prefix_extent(const ggml_tensor * tensor, const ggml_tensor * base, int64_t & outer);
