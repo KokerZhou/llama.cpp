@@ -171,5 +171,28 @@ int main() {
     check(free_calls == before_cleanup_free + 2 && destroy_calls == before_cleanup_destroy + 1,
           "shutdown retry releases final allocation and stream");
     check(failed_free_calls == 3, "eviction and shutdown retry the failed allocation");
+    // Run last: a partially finalized runtime cannot be reused in this process.
+    std::unique_ptr<ggml_cannge_ge_context> first(ggml_cannge_ge_context::create(0, err));
+    std::unique_ptr<ggml_cannge_ge_context> second(ggml_cannge_ge_context::create(0, err));
+    check(first != nullptr && second != nullptr, "successful teardown permits new sessions");
+    events.clear();
+    fail_finalize = true;
+    first.reset();
+    check(events == std::vector<std::string>{"session"}, "live session prevents global finalization");
+    second.reset();
+    check(runtime_partially_finalized && events == std::vector<std::string>({"session", "session", "finalize"}),
+          "last session observes partial finalization failure");
+    const int before_initialize = initialize_calls;
+    const int before_sessions = session_calls;
+    events.clear();
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        err.clear();
+        std::unique_ptr<ggml_cannge_ge_context> rejected(ggml_cannge_ge_context::create(0, err));
+        check(rejected == nullptr, "failed finalization prevents session reuse");
+        check(err.find("GEFinalize failed (status 23)") != std::string::npos &&
+              err.find("restart the process") != std::string::npos, "creation preserves finalization diagnostic");
+    }
+    check(initialize_calls == before_initialize && session_calls == before_sessions && events.empty(),
+          "rejected creation does not initialize, construct a session or finalize again");
     std::puts("PASS: CANNGE eviction and graph rollback failure recovery");
 }

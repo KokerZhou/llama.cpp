@@ -50,9 +50,14 @@
 // process-wide GE init reference count
 static std::mutex g_ge_mutex;
 static int        g_ge_ref_count = 0;
+static std::string g_ge_finalize_error;
 
 static bool ge_global_init(int32_t device, std::string & err) {
     std::lock_guard<std::mutex> lock(g_ge_mutex);
+    if (!g_ge_finalize_error.empty()) {
+        err = g_ge_finalize_error;
+        return false;
+    }
     if (g_ge_ref_count > 0) {
         g_ge_ref_count++;
         return true;
@@ -77,7 +82,13 @@ static bool ge_global_init(int32_t device, std::string & err) {
 static void ge_global_finalize() {
     std::lock_guard<std::mutex> lock(g_ge_mutex);
     if (g_ge_ref_count > 0 && --g_ge_ref_count == 0) {
-        ge::GEFinalize();
+        const ge::Status status = ge::GEFinalize();
+        if (status != ge::SUCCESS) {
+            // GE may have partially torn down its global state before returning failure.
+            g_ge_finalize_error = "GEFinalize failed (status " + std::to_string(status) + "): " +
+                                  ge::GEGetErrorMsg() + "; restart the process before creating another CANNGE session";
+            GGML_LOG_ERROR("%s: %s\n", __func__, g_ge_finalize_error.c_str());
+        }
     }
 }
 
