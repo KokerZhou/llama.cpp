@@ -238,9 +238,15 @@ bool ggml_cannge_build_context::get(ggml_tensor * t, cannge_es::EsTensorHolder &
     if (it == tensors.end()) {
         // CONT of a rearrange view (merged-attention V path): relabel
         // chain + fresh-row splice (note-50 batch K)
-        if (t->op == GGML_OP_CONT && ggml_cannge_build_cont_chain(*this, t, holder)) {
-            tensors[t] = holder;
-            return true;
+        if (t->op == GGML_OP_CONT) {
+            const auto result = ggml_cannge_build_cont_chain(*this, t, holder);
+            if (result == ggml_cannge_build_result::success) {
+                tensors[t] = holder;
+                return true;
+            }
+            if (result == ggml_cannge_build_result::failure) {
+                return false;
+            }
         }
         // rearrange-view input substituted by its base (plan.cpp): rebuild
         // the relabel chain in-GE from the registered base holder

@@ -77,24 +77,25 @@ bool ggml_cannge_onehot_slot(ggml_cannge_build_context & ctx, cannge_es::EsTenso
 static bool ggml_cannge_splice_fresh_row(ggml_cannge_build_context & ctx, ggml_tensor * t, ggml_tensor * v,
                                          cannge_es::EsTensorHolder & h);
 
-bool ggml_cannge_build_cont_chain(ggml_cannge_build_context & ctx, ggml_tensor * t, cannge_es::EsTensorHolder & h) {
+static ggml_cannge_build_result ggml_cannge_build_cont_chain_impl(ggml_cannge_build_context & ctx, ggml_tensor * t, cannge_es::EsTensorHolder & h) {
     if (t->op != GGML_OP_CONT || t->src[0] == nullptr || t->src[0]->view_src == nullptr) {
-        return false;
+        return ggml_cannge_build_result::not_applicable;
     }
     ggml_tensor * v = t->src[0];
     ggml_cannge_view_info info;
     if (!ggml_cannge_resolve_view(v, info)) {
-        return ctx.fail("invalid view chain for CONT " + std::string(t->name));
+        ctx.fail("invalid view chain for CONT " + std::string(t->name));
+        return ggml_cannge_build_result::failure;
     }
     // preferred: the source was built as a cgraph node in this fragment (its
     // PERMUTE/TRANSPOSE cases carry the correct byte semantics); the view_src
     // walk below is only the cross-fragment fallback, and ggml flattens view
     // chains so the walk cannot be trusted to replay the ops
     if (ctx.get(v, h)) {
-        return ggml_cannge_splice_fresh_row(ctx, t, v, h);
+        return ggml_cannge_splice_fresh_row(ctx, t, v, h) ? ggml_cannge_build_result::success : ggml_cannge_build_result::failure;
     }
     if (!ggml_cannge_is_rearrange_view_local(v)) {
-        return false;
+        return ggml_cannge_build_result::not_applicable;
     }
     std::vector<ggml_tensor *> chain;
     ggml_tensor *              base = v;
@@ -104,18 +105,35 @@ bool ggml_cannge_build_cont_chain(ggml_cannge_build_context & ctx, ggml_tensor *
     }
     auto bit = ctx.tensors.find(base);
     if (bit == ctx.tensors.end()) {
-        return false;
+        return ggml_cannge_build_result::not_applicable;
     }
     h = bit->second;
     if (!ggml_cannge_build_view_prefix(ctx, t, base, h)) {
-        return false;
+        return ggml_cannge_build_result::failure;
     }
     for (auto rit = chain.rbegin(); rit != chain.rend(); ++rit) {
         if (!ggml_cannge_build_relabel(*rit, h, ctx.err)) {
-            return false;
+            return ggml_cannge_build_result::failure;
         }
     }
-    return ggml_cannge_splice_fresh_row(ctx, t, v, h);
+    return ggml_cannge_splice_fresh_row(ctx, t, v, h) ? ggml_cannge_build_result::success : ggml_cannge_build_result::failure;
+}
+
+ggml_cannge_build_result ggml_cannge_build_cont_chain(ggml_cannge_build_context & ctx, ggml_tensor * t,
+                                                     cannge_es::EsTensorHolder & holder) {
+    const std::string previous_error = ctx.err;
+    ctx.err.clear();
+    cannge_es::EsTensorHolder candidate;
+    const auto result = ggml_cannge_build_cont_chain_impl(ctx, t, candidate);
+    if (result == ggml_cannge_build_result::success) {
+        holder = candidate;
+    }
+    if (result != ggml_cannge_build_result::failure) {
+        ctx.err = previous_error;
+    } else if (ctx.err.empty()) {
+        ctx.fail("CONT chain construction failed for " + std::string(t->name));
+    }
+    return result;
 }
 
 // replace the slot written by the sibling SET_ROWS with the in-fragment row
@@ -149,7 +167,7 @@ static bool ggml_cannge_splice_fresh_row(ggml_cannge_build_context & ctx, ggml_t
     }
     ge::DataType f32, dt;
     if (!ggml_cannge_ge_dtype(GGML_TYPE_F32, f32) || !ggml_cannge_ge_dtype(t->type, dt)) {
-        return false;
+        return ctx.fail("unsupported fresh-row splice dtype for " + std::string(t->name));
     }
     const int64_t S = t->ne[0];
     const int64_t M = sr->idx->ne[0];

@@ -88,7 +88,11 @@ bool ggml_cannge_build_tensor(ggml_cannge_build_context & ctx, ggml_tensor * nod
             // fresh-row splice instead of a staged materialization
             if (!ggml_is_contiguous(src0) && src0->view_src != nullptr) {
                 cannge_es::EsTensorHolder chained;
-                if (ggml_cannge_build_cont_chain(ctx, node, chained)) {
+                const auto result = ggml_cannge_build_cont_chain(ctx, node, chained);
+                if (result == ggml_cannge_build_result::failure) {
+                    return false;
+                }
+                if (result == ggml_cannge_build_result::success) {
                     ctx.tensors[node] = chained;
                     return true;
                 }

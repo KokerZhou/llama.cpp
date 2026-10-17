@@ -25,8 +25,14 @@ bool ggml_cannge_build_relabel(ggml_tensor * step, cannge_es::EsTensorHolder & h
 
 struct ggml_cannge_build_context;
 struct ggml_cannge_set_rows_op;
+enum class ggml_cannge_build_result {
+    not_applicable,
+    success,
+    failure,
+};
+
 // CONT of a rearrange view -> in-GE relabel chain + fresh-row splice
-bool ggml_cannge_build_cont_chain(ggml_cannge_build_context & ctx, ggml_tensor * t, cannge_es::EsTensorHolder & h);
+ggml_cannge_build_result ggml_cannge_build_cont_chain(ggml_cannge_build_context & ctx, ggml_tensor * t, cannge_es::EsTensorHolder & h);
 const ggml_cannge_set_rows_op * ggml_cannge_sr_for_base(ggml_cannge_build_context & ctx, ggml_tensor * base);
 bool ggml_cannge_onehot_slot(ggml_cannge_build_context & ctx, cannge_es::EsTensorHolder idxh, int64_t S,
                              cannge_es::EsTensorHolder & mask, ggml_tensor * idx);

@@ -55,6 +55,8 @@ Plan preparation includes cache lookup, compilation and loading. Timing totals t
 
 Mask and index snapshots are implemented in `cpy.cpp`. They check synchronization and copy results before consuming device data. Index snapshots preserve tensor strides and widen I32 values to I64 only after a successful read; attention-mask reads use the first row's element stride. Failed snapshots stop the graph before GE execution.
 
+CONT-chain construction distinguishes success, an inapplicable optimization, and failure. Callers may use a plain alias only for the inapplicable case; invalid relabels and splice failures stop construction. The helper publishes its output holder only on success and preserves the caller's diagnostic when an optional lookup does not apply. This does not roll back ES nodes already created during an attempt.
+
 ## Ownership and failure handling
 
 Backend initialization rejects failed device selection, failed stream creation and null streams. Execution also checks device selection before preparing a graph.
