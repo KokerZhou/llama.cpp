@@ -2,6 +2,7 @@
 #include "supports.h"
 #include "ggml-impl.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -185,6 +186,10 @@ int main() {
     check(aliased.output_tensors.size() == 1, "alias avoids redundant port");
 
     fixture scatter;
+    for (int tensor : {0, 2}) {
+        scatter.tensors[tensor].ne[1] = 8;
+        scatter.tensors[tensor].nb[2] = scatter.tensors[tensor].nb[3] = 128;
+    }
     scatter.tensors[3].type = GGML_TYPE_I32;
     scatter.tensors[2].op = GGML_OP_SET_ROWS;
     scatter.tensors[2].src[1] = &scatter.tensors[3];
@@ -206,11 +211,27 @@ int main() {
     check(ggml_cannge_plan_analyze(&scatter.graph, merged, err, options), "merged cache analysis");
     check(merged.set_rows[0].in_graph && merged.output_tensors.size() == 1, "merged cache output deduplicated");
 
+    // Both opt-in routes must retain host scatter for batched row data.
+    for (int dimension : {2, 3}) {
+        scatter.tensors[0].ne[dimension] = scatter.tensors[1].ne[dimension] = scatter.tensors[2].ne[dimension] = 2;
+        for (bool merged_scatter : {false, true}) {
+            options = {};
+            options.scatter = !merged_scatter;
+            options.contiguous_views = merged_scatter;
+            ggml_cannge_plan_io batched;
+            check(ggml_cannge_plan_analyze(&scatter.graph, batched, err, options), "batched scatter analysis");
+            check(!batched.set_rows[0].in_graph, "batched scatter cannot use matrix-only GE builder");
+            check(std::find(batched.output_tensors.begin(), batched.output_tensors.end(), &scatter.tensors[1]) !=
+                  batched.output_tensors.end(), "batched host scatter materializes row producer");
+        }
+        scatter.tensors[0].ne[dimension] = scatter.tensors[1].ne[dimension] = scatter.tensors[2].ne[dimension] = 1;
+    }
+
     // The disable switch must override the opt-in in scheduling and side-effect planning.
     auto cont_source = scatter.tensors[0];
     cont_source.ne[0] = 2; cont_source.ne[1] = 2;
     cont_source.nb[0] = 8; cont_source.nb[1] = 4;
-    auto cont_output = scatter.tensors[0];
+    auto cont_output = f.tensors[0];
     cont_output.op = GGML_OP_CONT; cont_output.src[0] = &cont_source;
     for (bool enabled : {false, true}) {
         for (bool disabled : {false, true}) {

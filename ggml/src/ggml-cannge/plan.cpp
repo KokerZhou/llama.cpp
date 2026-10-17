@@ -44,6 +44,21 @@ static bool ggml_cannge_plan_record_io(ggml_cannge_plan_io & io, ggml_tensor * t
     return true;
 }
 
+// TensorScatterUpdate writes rows into a matrix; batched indices use host scatter.
+static bool ggml_cannge_can_scatter_in_graph(const ggml_tensor * node) {
+    const ggml_tensor * data = node->src[0];
+    const ggml_tensor * idx = node->src[1];
+    const ggml_tensor * dst = node->src[2];
+    if (data == nullptr || idx == nullptr || dst == nullptr ||
+        !ggml_cannge_float_dtype(data->type) || !ggml_cannge_float_dtype(dst->type) ||
+        (idx->type != GGML_TYPE_I32 && idx->type != GGML_TYPE_I64)) {
+        return false;
+    }
+    return ggml_n_dims(dst) == 2 && data->ne[0] == dst->ne[0] && data->ne[1] == idx->ne[0] &&
+           data->ne[0] > 0 && idx->ne[0] > 0 && data->ne[2] == 1 && data->ne[3] == 1 &&
+           idx->ne[1] == 1 && idx->ne[2] == 1 && idx->ne[3] == 1;
+}
+
 namespace {
 class ggml_cannge_plan_analysis {
     ggml_cgraph * cgraph;
@@ -103,12 +118,8 @@ class ggml_cannge_plan_analysis {
             if (ggml_is_empty(node) || node->op != GGML_OP_SET_ROWS) {
                 continue;
             }
-            const ggml_tensor * data = node->src[0];
-            const ggml_tensor * idx  = node->src[1];
-            const ggml_tensor * dst  = node->src[2];
-            sr_in_graph[node] = scatter_enabled && data != nullptr && idx != nullptr && dst != nullptr &&
-                                ggml_cannge_float_dtype(data->type) && ggml_cannge_float_dtype(dst->type) &&
-                                (idx->type == GGML_TYPE_I32 || idx->type == GGML_TYPE_I64) && ggml_nelements(idx) == 1;
+            sr_in_graph[node] = scatter_enabled && ggml_cannge_can_scatter_in_graph(node) &&
+                                ggml_nelements(node->src[1]) == 1;
         }
     }
 
@@ -183,13 +194,8 @@ class ggml_cannge_plan_analysis {
             is_input[t] = true;
         }
 
-        // batch P (note-52): merged-attention cache refresh. With the attention
-        // merged (CONT_NC), a SET_ROWS whose dst view's base is a device input
-        // writes the fresh cache IN-GRAPH (one-hot select, M=1 or matrix form) -
-        // the node itself becomes an output port (its ggml buffer IS the cache)
-        // and the post-execute host scatter is skipped. This replaces the
-        // Kcur/Vcur forced data ports that GE's runtime refresh mechanism
-        // collapses into one buffer when many same-shaped outputs share a graph.
+        // Keep supported merged-cache updates in GE and expose the updated cache as an output.
+        // Other layouts retain the host scatter and its row-data output port.
         if (options.allow_noncontiguous_cont()) {
             for (int i = 0; i < n_nodes; i++) {
                 ggml_tensor * node = cgraph->nodes[i];
@@ -197,7 +203,8 @@ class ggml_cannge_plan_analysis {
                     continue;
                 }
                 ggml_cannge_view_info dinfo;
-                if (ggml_cannge_resolve_view(node->src[2], dinfo) && is_input.count(dinfo.base)) {
+                if (ggml_cannge_can_scatter_in_graph(node) &&
+                    ggml_cannge_resolve_view(node->src[2], dinfo) && is_input.count(dinfo.base)) {
                     sr_in_graph[node] = true;
                     io.outputs.push_back(node);
                 }
