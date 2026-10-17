@@ -11,3 +11,6 @@ bool ggml_cannge_set_rows(const ggml_cannge_set_rows_op & op, const std::vector<
 
 bool ggml_cannge_read_indices(const ggml_tensor * tensor, aclrtStream stream, std::vector<int64_t> & slots);
 bool ggml_cannge_upload_attention_length(const ggml_tensor * mask, void * destination, aclrtStream stream);
+
+// Blocking snapshot: device reads first drain the producer stream.
+bool ggml_cannge_read_snapshot(const ggml_tensor * tensor, size_t size, aclrtStream stream, std::vector<char> & snapshot);

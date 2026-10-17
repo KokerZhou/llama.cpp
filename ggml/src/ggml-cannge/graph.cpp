@@ -99,18 +99,8 @@ static ggml_status ggml_cannge_finish_execution(
             if (staged) {
                 continue;
             }
-            const bool data_host = sr.data->buffer != nullptr && ggml_backend_buffer_is_host(sr.data->buffer);
-            sr_data[sri].resize(ggml_nbytes(sr.data));
-            if (data_host) {
-                memcpy(sr_data[sri].data(), sr.data->data, sr_data[sri].size());
-            } else {
-                // produced or refreshed on this stream just above: enqueue
-                // the D2H on the same stream, one shared drain after the
-                // copy-back loop covers all set_rows (was a per-row sync)
-                if (!ggml_cannge_check(aclrtMemcpyAsync(sr_data[sri].data(), sr_data[sri].size(), sr.data->data,
-                                           sr_data[sri].size(), ACL_MEMCPY_DEVICE_TO_HOST, ctx->stream), "aclrtMemcpyAsync", __func__)) {
-                    return ggml_cannge_transfer_failed(ctx, plan);
-                }
+            if (!ggml_cannge_read_snapshot(sr.data, ggml_nbytes(sr.data), ctx->stream, sr_data[sri])) {
+                return ggml_cannge_transfer_failed(ctx, plan);
             }
         }
     }
@@ -138,22 +128,8 @@ static ggml_status ggml_cannge_finish_execution(
         }
     }
 
-    // SET_ROWS snapshot for staged outputs: t->data was filled by the
-    // copy-back loop above. One shared drain covers those copy-backs and
-    // every async D2H issued in the pre-loop (was a per-row sync)
-    bool any_sr_data = false;
-    for (size_t sri = 0; sri < io.set_rows.size(); sri++) {
-        if (!io.set_rows[sri].in_graph && !sr_data_staged[sri]) {
-            const ggml_tensor * d = io.set_rows[sri].data;
-            if (d != nullptr && !(d->buffer != nullptr && ggml_backend_buffer_is_host(d->buffer))) {
-                any_sr_data = true;
-            }
-        }
-        if (sr_data_staged[sri] && !io.set_rows[sri].in_graph) {
-            any_sr_data = true;
-        }
-    }
-    if (any_sr_data) {
+    // Staged snapshots must observe copy-back completion, including copies into host tensors.
+    if (std::find(sr_data_staged.begin(), sr_data_staged.end(), true) != sr_data_staged.end()) {
         if (!ggml_cannge_check(aclrtSynchronizeStream(ctx->stream), "aclrtSynchronizeStream", __func__)) {
             return ggml_cannge_transfer_failed(ctx, plan);
         }
@@ -166,15 +142,8 @@ static ggml_status ggml_cannge_finish_execution(
         if (sr.in_graph) {
             continue; // written by an in-graph GE ScatterUpdate
         }
-        const bool data_host = sr.data->buffer != nullptr && ggml_backend_buffer_is_host(sr.data->buffer);
-        sr_data[sri].resize(ggml_nbytes(sr.data));
-        if (data_host) {
-            memcpy(sr_data[sri].data(), sr.data->data, sr_data[sri].size());
-        } else {
-            if (!ggml_cannge_check(aclrtMemcpy(sr_data[sri].data(), sr_data[sri].size(), sr.data->data, sr_data[sri].size(),
-                                  ACL_MEMCPY_DEVICE_TO_HOST), "aclrtMemcpy", __func__)) {
-                return ggml_cannge_transfer_failed(ctx, plan);
-            }
+        if (!ggml_cannge_read_snapshot(sr.data, ggml_nbytes(sr.data), ctx->stream, sr_data[sri])) {
+            return ggml_cannge_transfer_failed(ctx, plan);
         }
     }
 

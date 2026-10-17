@@ -34,7 +34,7 @@
 #include <cstring>
 #include <limits>
 
-static bool ggml_cannge_read_host(const ggml_tensor * tensor, size_t size, aclrtStream stream,
+bool ggml_cannge_read_snapshot(const ggml_tensor * tensor, size_t size, aclrtStream stream,
                                   std::vector<char> & snapshot) {
     snapshot.resize(size);
     if (tensor->buffer != nullptr && ggml_backend_buffer_is_host(tensor->buffer)) {
@@ -73,7 +73,7 @@ bool ggml_cannge_read_indices(const ggml_tensor * tensor, aclrtStream stream, st
         return false;
     }
     std::vector<char> snapshot;
-    if (!ggml_cannge_read_host(tensor, span, stream, snapshot)) {
+    if (!ggml_cannge_read_snapshot(tensor, span, stream, snapshot)) {
         return false;
     }
     std::vector<int64_t> result(count);
@@ -111,7 +111,7 @@ bool ggml_cannge_upload_attention_length(const ggml_tensor * mask, void * destin
     }
     const size_t span = (size_t) last * mask->nb[0] + es;
     std::vector<char> snapshot;
-    if (!ggml_cannge_read_host(mask, span, stream, snapshot)) {
+    if (!ggml_cannge_read_snapshot(mask, span, stream, snapshot)) {
         return false;
     }
     int64_t length = mask->ne[0];
@@ -215,9 +215,12 @@ bool ggml_cannge_set_rows(const ggml_cannge_set_rows_op & op, const std::vector<
         converted.resize(data.size() / es_src * es_dst);
     }
     const size_t row_size = (size_t) src->ne[0] * es_dst;
-    bool copied = true;
-    for (int64_t i3 = 0; i3 < src->ne[3] && copied; i3++) {
-        for (int64_t i2 = 0; i2 < src->ne[2] && copied; i2++) {
+    // Blocking uploads use the default stream; finish graph writes before scattering rows.
+    if (!host && !ggml_cannge_check(aclrtSynchronizeStream(stream), "SET_ROWS synchronization", __func__)) {
+        return false;
+    }
+    for (int64_t i3 = 0; i3 < src->ne[3]; i3++) {
+        for (int64_t i2 = 0; i2 < src->ne[2]; i2++) {
             for (int64_t i = 0; i < idx->ne[0]; i++) {
                 const size_t slot_id = (size_t) i + (size_t) (i2 % idx->ne[1]) * idx->ne[0] +
                                       (size_t) (i3 % idx->ne[2]) * idx->ne[0] * idx->ne[1];
@@ -237,18 +240,14 @@ bool ggml_cannge_set_rows(const ggml_cannge_set_rows_op & op, const std::vector<
                 }
                 if (host) {
                     memcpy(dst_row, row, row_size);
-                } else if (aclrtMemcpyAsync(dst_row, row_size, row, row_size, ACL_MEMCPY_HOST_TO_DEVICE, stream) != ACL_SUCCESS) {
-                    copied = false;
-                    break;
+                } else if (!ggml_cannge_check(aclrtMemcpy(dst_row, row_size, row, row_size, ACL_MEMCPY_HOST_TO_DEVICE),
+                                                "SET_ROWS upload", __func__)) {
+                    return false;
                 }
             }
         }
     }
-    // Both snapshots must stay alive until every queued host copy completes.
-    if (!host && aclrtSynchronizeStream(stream) != ACL_SUCCESS) {
-        return false;
-    }
-    return copied;
+    return true;
 }
 
 // element matrix; 16x16 tiles keep both sides cache-resident (the naive

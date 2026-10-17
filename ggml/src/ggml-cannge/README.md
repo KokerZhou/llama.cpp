@@ -74,14 +74,14 @@ Eviction retains a plan if stream synchronization or graph removal fails, so a l
 
 `ggml_cannge_check(error, operation, function)` logs the failed operation and returns a boolean. Callers must propagate that result when their interface supports failure; the function does not throw or return from the caller. Cleanup and void backend callbacks still have separate error-handling limitations.
 
-`ggml_cannge_finish_execution` owns temporary output snapshots through copy-back and scatter completion. Transfer failure paths invalidate reusable staging and attempt to drain queued copies before returning. A failed stream synchronization is not proof that queued work completed; device-error recovery needs real-runtime validation.
+Temporary output snapshots and converted SET_ROWS rows use blocking transfers. Device snapshots drain the producer stream before reading; device scatter drains it before uploading rows. No asynchronous transfer retains these temporary host buffers after a failure. This changes host-scatter scheduling and needs device performance measurements. Transfers between persistent tensor/staging buffers remain asynchronous; failure paths invalidate reusable staging and attempt to drain queued copies before returning. A failed stream synchronization is not proof that queued work completed; device-error recovery and final context destruction still need real-runtime validation.
 
 ## Validation boundaries
 
 SDK-free tests can check support decisions, allocation failure handling, layout copies and deferred-copy lifetimes. Stub compilation checks C++ structure only. A real CANN SDK build, device correctness tests and performance measurements are required before treating changes as hardware-validated.
 
 
-The persistent regression targets in `tests/` build without CANN or GE. Metadata tests compile the production view, plan and options modules with small ggml metadata stubs. Lifecycle tests compile production context and GE wrapper code against fault-injecting ACL/GE stubs, checking eviction retention, removal retries, compile rollback and normal teardown ordering. These tests do not validate SDK compatibility or device execution. From the repository root:
+The persistent regression targets in `tests/` build without CANN or GE. Metadata tests compile the production view, plan and options modules with small ggml metadata stubs. Lifecycle tests compile production context and GE wrapper code against fault-injecting ACL/GE stubs, checking eviction retention, removal retries, compile rollback and normal teardown ordering. Copy tests compile production copy code and check snapshot/scatter ordering, failure propagation and F32-to-F16 row conversion without queuing temporary buffers. These tests do not validate SDK compatibility or device execution. From the repository root:
 
 ```sh
 cmake -S ggml/src/ggml-cannge/tests -B build-cannge-metadata
