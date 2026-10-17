@@ -48,7 +48,7 @@ static bool ggml_cannge_plan_record_io(ggml_cannge_plan_io & io, ggml_tensor * t
 static bool ggml_cannge_can_scatter_in_graph(const ggml_tensor * node) {
     const ggml_tensor * data = node->src[0];
     const ggml_tensor * idx = node->src[1];
-    const ggml_tensor * dst = node->src[2];
+    ggml_tensor * dst = node->src[2];
     if (data == nullptr || idx == nullptr || dst == nullptr ||
         !ggml_cannge_float_dtype(data->type) || !ggml_cannge_float_dtype(dst->type) ||
         (idx->type != GGML_TYPE_I32 && idx->type != GGML_TYPE_I64)) {
