@@ -1,0 +1,32 @@
+# Official GE source audit
+
+Reviewed 2026-10-18. Reference: https://gitcode.com/cann/ge.git, commit `0c84d0638fbcec224db5add5a4bcd8c6be78018f`, shallow clone at `buaax:/home/shengjiayi/cann-ge-api-audit` (255 MB). Backend inspected: `67e4551`. No SDK installation or build was performed. This upstream snapshot is not evidence that an older installed toolkit has identical behavior.
+
+## Concrete findings
+
+1. **Graph removal is not transactional.** In `compiler/graph/manager/graph_manager.cc:2466`, `InnerRemoveGraph` calls `RemoveGraphNode` before checking `TryUnloadModel`. If unloading fails, a retry can encounter a missing graph. `api/session/client/ge_api.cc:498` collapses an inner removal error to `FAILED`, so our wrapper cannot distinguish missing graphs from other failures through this return value. Our retention prevents immediate buffer release, but repeated removal is not a complete recovery protocol. The lifecycle stub's failure-without-mutation model misses this case. Do not treat a failed retry as permission to free memory; session retirement and runtime teardown need a separately verified recovery policy.
+2. **Output registration errors are ignored.** `inc/external/ge/eager_style_graph_builder/cpp/es_graph_builder.h:529` returns the status from `EsSetGraphOutput` (zero means success). `graph-build.cpp` ignores it. Report the output index and fail construction when registration fails; a null check after BuildAndReset is weaker than checking the failing operation.
+3. **GE finalization can fail after partial teardown.** `api/session/client/ge_api_v2.cc:391` finalizes sessions and plugins, aggregates GELib/TBE finalization errors, and only clears its initialized state on success. `ge.cpp` drops its reference count to zero and ignores the result. A later backend creation can therefore encounter runtime state inconsistent with our bookkeeping. Blindly retrying or pretending finalization succeeded is not established safe by this source.
+
+## Special handling assessment
+
+| Backend handling | Upstream evidence | Assessment |
+| --- | --- | --- |
+| `_GLIBCXX_USE_CXX11_ABI=0` | `cmake/generate_es_package.cmake:1131-1143` uses ABI 0 for generated ES libraries by default. | Supported for the inspected build configuration; still match the actual installed binaries. |
+| Global `GE_FUNC_VISIBILITY=` compiler definition | `inc/external/ge/ge_error_codes.h:14-27` already defines it according to platform and FUNC_VISIBILITY. | Not needed to compensate for this header. The claimed packaging defect needs an exact affected SDK version; do not apply that claim to upstream generally. |
+| AddGraphWithCopy | `api/session/client/ge_api.cc:447`, `api/session/session/inner_session.cc:388` implement the copied-graph entry point. | Appropriate ownership API. InnerSession sets graph/session IDs before delegating, so do not broaden copy isolation into a claim of no caller-visible metadata writes. |
+| `ge.tiling_schedule_optimize=1` | `compiler/api/aclgrph/option_utils.cc:1250` accepts 0/1; `compiler/graph/partition/dynamic_shape_partition.cc:144` consumes it. | Real option, not a demonstrated necessity for every graph. |
+| `ge.exec.reuseZeroCopyMemory=1` | `runtime/v1/graph/load/model_manager/model_utils.cc:1296` and `davinci_model.cc:2991` change zero-copy handling. | Real memory policy with aliasing implications, not a generic performance guarantee. Keep staging/lifetime reasoning independent of its name. |
+| BatchMatMulV3 instead of MatMulV3 | `tests/autofuse/framework/eager_style_graph_builder/all_ops.cpp:7447,30836` builds both; `compiler/graph/optimize/symbolic/infer_symbolic_shape/infer/matmul_ops.cc:204-206` registers both symbolic shape functions. | Current source does not justify a universal MatMulV3 prohibition. This does not disprove missing datatype inference in an older operator package. |
+| 32-byte M/N/K gate; BIGMM size cap; GEMV Mul/ReduceSum | The inspected ES MatMul wrappers do not impose these limits. Device tiling is not established by wrapper construction. | Backend policies derived from old observations, not verified general GE API constraints. Need exact SDK/SoC reproducers and operator-package evidence before removing or generalizing. |
+| Fixed GEMV chunk 13107 | `mul-mat.cpp` derives its comment from K=2560, but applies the constant to other K. | A claimed element cap is not guaranteed by a fixed row count. Derive from K if that cap is substantiated; source review has not established the cap itself. |
+| Primitive RMS normalization | `all_ops.cpp:40899` exposes RmsNorm; `:39019` confirms ReduceMean takes a tensor of axes and keep_dims. | Primitive construction is consistent with the schema. Claimed 310P3 row loss remains an unverified version/device observation. |
+| TensorScatterUpdate and fresh-row splicing | `all_ops.cpp:52214` connects x, indices, updates and returns y. Backend currently uses TensorScatterUpdate. | Comments saying scatter universally no-ops or that the current implementation is a one-hot replacement are stale and conflict with the code. Splicing still has a separate dataflow purpose when host SET_ROWS occurs after execution. |
+| GQA kq/v classification by K=128 | This is in the backend selector, not the inspected GE API wrappers. | Model-shape heuristic; contraction width alone does not identify attention semantics. |
+| IFA/PFA optional argument order | `all_ops.cpp:26342,37090` matches the inspected tensor-slot ordering in `fattn.cpp`. | Schema check only. It does not establish BOOL mask polarity, the claim that decode ignores masks, or correctness of replacing a mask with prefix sequence length. Those require operator contracts and numerical cases. |
+
+Source references above are relative to the pinned [official GE tree](https://gitcode.com/cann/ge/tree/0c84d0638fbcec224db5add5a4bcd8c6be78018f). The generated all_ops file is test-side schema evidence, not a compiled production kernel or proof of the installed C++ wrapper ABI.
+
+## Next validation
+
+Prioritize partial-removal and finalization state handling, and checked ES output registration. Update failure tests to represent partial mutation, not only failures that preserve all state. Audit operator-specific mask and datatype contracts in the matching operator packages before changing attention/GEMV policy. Preserve an exact SDK/SoC/reproducer record for each retained workaround. The GE clone does not itself verify ACL allocation/stream failure semantics or provide device performance measurements.

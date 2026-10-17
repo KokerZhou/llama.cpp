@@ -1,5 +1,7 @@
 # CANNGE official API contract audit
 
+The subsequent [official GE source audit](GE-SOURCE-AUDIT.md) identifies partial-removal and finalization failure behavior that the API documentation alone did not establish.
+
 Reviewed 2026-10-18 against source at dc6d218, with the device-selection comment corrected afterward. This is a focused lifecycle and transfer contract review, not an SDK build, full operator audit, numerical test or performance result. Documentation versions below differ; recheck against the actual installed SDK and device before deployment.
 
 | Area | Source assessment | Official evidence |
