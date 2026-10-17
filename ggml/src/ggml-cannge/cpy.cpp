@@ -152,12 +152,15 @@ const void * ggml_cannge_staging_source(const ggml_tensor * tensor) {
     return tensor->data;
 }
 
-bool ggml_cannge_reserve_input_arena(void *& device, void *& host, size_t & capacity, size_t size, aclrtStream stream) {
-    if (size <= capacity) {
+bool ggml_cannge_reserve_input_arena(void *& device, void *& host, size_t & capacity, size_t size, aclrtStream stream, bool pending) {
+    if (size <= capacity && !pending) {
         return true;
     }
     if (!ggml_cannge_check(aclrtSynchronizeStream(stream), "input arena synchronization", __func__)) {
         return false;
+    }
+    if (size <= capacity) {
+        return true;
     }
     void * new_device = nullptr;
     void * new_host = nullptr;

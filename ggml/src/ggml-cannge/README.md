@@ -72,6 +72,8 @@ Backend initialization rejects failed device selection, failed stream creation a
 
 The execution context owns the GE session and cached plans. Plans own staging allocations; per-call IO analysis holds current tensor pointers. Reusable staging assumes that weight contents remain immutable at a given source address.
 
+Plans track unconfirmed input-arena uploads. After a failed drain, even same-capacity arena reuse must synchronize successfully before host contents can be overwritten. Normal reuse after a completed upload does not add a drain.
+
 Eviction retains a plan if stream synchronization or graph removal fails, so a later attempt can retry. A cache miss makes room before building its replacement; failed eviction stops preparation without adding another GE graph. Removing a graph already released by compile rollback succeeds without calling GE again.
 
 Backend release selects the context's device and drains its stream before destruction. Failed contexts remain on a mutex-protected retired list, retaining their session and staging buffers. Later backend releases retry them. If no later drain succeeds, these resources remain allocated until process exit; this path does not reset the device or claim recovery from a permanent device failure. Context destruction is private so callers cannot bypass this release path.

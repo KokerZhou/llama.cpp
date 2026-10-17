@@ -65,7 +65,9 @@ static bool ggml_cannge_bind_tensor(ggml_tensor * t, gert::Tensor & tensor, void
 
 static ggml_status ggml_cannge_transfer_failed(ggml_backend_cannge_context * ctx, ggml_cannge_plan * plan) {
     std::fill(plan->input_staged_sources.begin(), plan->input_staged_sources.end(), nullptr);
-    ggml_cannge_check(aclrtSynchronizeStream(ctx->stream), "drain failed transfer", __func__);
+    if (ggml_cannge_check(aclrtSynchronizeStream(ctx->stream), "drain failed transfer", __func__)) {
+        plan->in_arena_pending = false;
+    }
     return GGML_STATUS_FAILED;
 }
 
@@ -313,16 +315,19 @@ static ggml_status ggml_cannge_bind_inputs(ggml_backend_cannge_context * ctx, gg
     }
     if (arena_need > 0) {
         if (!ggml_cannge_reserve_input_arena(plan->in_arena, plan->in_arena_host, plan->in_arena_size,
-                                            arena_need, ctx->stream)) {
+                                            arena_need, ctx->stream, plan->in_arena_pending)) {
             GGML_LOG_ERROR("%s: failed to reserve input arena (%zu bytes)\n", __func__, arena_need);
             return ggml_cannge_transfer_failed(ctx, plan);
         }
+        plan->in_arena_pending = false;
         for (size_t i = 0; i < io.inputs.size(); i++) {
             if (in_arena_on[i]) {
                 memcpy((char *) plan->in_arena_host + in_arena_off[i], io.inputs[i]->data,
                        ggml_nbytes(io.inputs[i]));
             }
         }
+        // A failed enqueue is conservatively treated as pending until a successful drain.
+        plan->in_arena_pending = true;
         if (!ggml_cannge_check(aclrtMemcpyAsync(plan->in_arena, arena_need, plan->in_arena_host, arena_need,
                                        ACL_MEMCPY_HOST_TO_DEVICE, ctx->stream), "aclrtMemcpyAsync", __func__)) {
             return ggml_cannge_transfer_failed(ctx, plan);
@@ -410,6 +415,7 @@ static ggml_status ggml_cannge_bind_inputs(ggml_backend_cannge_context * ctx, gg
         if (!ggml_cannge_check(aclrtSynchronizeStream(ctx->stream), "aclrtSynchronizeStream", __func__)) {
             return ggml_cannge_transfer_failed(ctx, plan);
         }
+        plan->in_arena_pending = false;
     }
     plan->input_staged_sources = staging_sources;
     ready_at = g_dbg_time.on ? g_dbg_time.now() : 0;

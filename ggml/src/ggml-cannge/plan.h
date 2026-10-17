@@ -120,6 +120,7 @@ struct ggml_cannge_plan {
     void *  in_arena       = nullptr;
     void *  in_arena_host  = nullptr;
     size_t  in_arena_size  = 0;
+    bool    in_arena_pending = false; // host contents cannot change until the upload is drained
     // Source addresses of staged weight inputs; null means the copy is not reusable.
     std::vector<const void *> input_staged_sources;
 
