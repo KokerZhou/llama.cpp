@@ -11,7 +11,8 @@ The layout follows the sibling CPU/CUDA backends: a backend entry point, shared 
 | `supports.cpp` | Scheduling policy and per-operation capability predicates |
 | `options.cpp` / `options.h` | Parsed graph configuration and its cache signature |
 | `cpy.cpp` | Layout conversion, staging allocation and row scatter |
-| `plan.cpp` | Per-call IO analysis and cache signatures |
+| `plan.cpp` | Per-call IO analysis |
+| `plan-key.cpp` | Address-independent graph and binding signatures |
 | `view.cpp` / `view.h` | Shared view metadata, cycle detection and registered-base selection |
 | `ge.cpp` | GE initialization, sessions and graph lifecycle |
 | `common.cpp` / `common.h` | Shared ACL diagnostics, constants and timing |
@@ -50,7 +51,7 @@ When adding a graph-affecting option, add its field, environment parsing and sig
 
 ## Plan analysis
 
-The plan analyzer separates graph indexing, external inputs, boundary outputs, side effects, output-port ordering, layout resolution and memory estimation. The coordinator keeps this order explicit; producer and consumer maps are local to one analysis. The separate debug stage does not change planning decisions. Analysis replaces the IO result only after all stages succeed; failure preserves the previous result and identifies the invalid input, output or side-effect view. Reusing an IO object does not accumulate ports or memory estimates.
+The plan analyzer separates graph indexing, external inputs, boundary outputs, side effects, output-port ordering, layout resolution and memory estimation. The coordinator keeps this order explicit; producer and consumer maps are local to one analysis. The separate debug stage does not change planning decisions. Analysis replaces the IO result only after all stages succeed; failure preserves the previous result and identifies the invalid input, output or side-effect view. Reusing an IO object does not accumulate ports or memory estimates. Cache signatures include external view/CONT dependencies, their operation parameters, and resolved input-base bindings. Tensor IDs follow traversal order, so relocating the same graph preserves its key.
 
 ## Execution stages
 

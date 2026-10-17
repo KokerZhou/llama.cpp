@@ -136,5 +136,54 @@ int main() {
     check(!ggml_cannge_plan_analyze(&broken_output.graph, retained, err, options), "invalid output rejected");
     check(err == "invalid output view chain: broken_output", "output diagnostic identifies tensor");
     check(key == ggml_cannge_plan_signature(&f.graph, retained), "output failure preserves previous analysis");
+    fixture alias_graph;
+    ggml_tensor base_b = alias_graph.tensors[0];
+    ggml_tensor external_view = alias_graph.tensors[0];
+    external_view.op = GGML_OP_TRANSPOSE;
+    external_view.view_src = &alias_graph.tensors[0];
+    external_view.src[0] = &alias_graph.tensors[0];
+    external_view.ne[0] = 1; external_view.ne[1] = 4;
+    external_view.nb[0] = 16; external_view.nb[1] = 4;
+    alias_graph.tensors[2].src[0] = &base_b;
+    ggml_tensor consumer = external_view;
+    consumer.op = GGML_OP_SQR; consumer.view_src = nullptr; consumer.src[0] = &external_view;
+    ggml_tensor * alias_nodes[] = {&alias_graph.tensors[1], &alias_graph.tensors[2], &consumer};
+    alias_graph.graph.nodes = alias_nodes; alias_graph.graph.n_nodes = 3;
+    ggml_cannge_plan_io alias_a, alias_b;
+    check(ggml_cannge_plan_analyze(&alias_graph.graph, alias_a, err, options), "first view base");
+    const auto alias_key = ggml_cannge_plan_signature(&alias_graph.graph, alias_a);
+    external_view.view_src = &base_b; external_view.src[0] = &base_b;
+    check(ggml_cannge_plan_analyze(&alias_graph.graph, alias_b, err, options), "second view base");
+    check(alias_a.inputs == alias_b.inputs && alias_a.output_tensors == alias_b.output_tensors, "alias change retains port order");
+    check(alias_key != ggml_cannge_plan_signature(&alias_graph.graph, alias_b), "external view base participates in key");
+    const auto second_alias_key = ggml_cannge_plan_signature(&alias_graph.graph, alias_b);
+    ggml_tensor * originals[] = {&alias_graph.tensors[0], &base_b, &external_view,
+                                &alias_graph.tensors[1], &alias_graph.tensors[2], &consumer};
+    ggml_tensor moved[6];
+    for (size_t i = 0; i < 6; i++) { moved[i] = *originals[i]; }
+    auto remap = [&](ggml_tensor * tensor) -> ggml_tensor * {
+        if (tensor == nullptr) { return nullptr; }
+        for (size_t i = 0; i < 6; i++) { if (originals[i] == tensor) { return &moved[i]; } }
+        check(false, "fixture dependency mapped");
+        return nullptr;
+    };
+    for (auto & tensor : moved) {
+        tensor.view_src = remap(tensor.view_src);
+        for (auto & source : tensor.src) { source = remap(source); }
+    }
+    ggml_tensor * moved_nodes[] = {&moved[3], &moved[4], &moved[5]};
+    ggml_cgraph moved_graph{}; moved_graph.nodes = moved_nodes; moved_graph.n_nodes = 3;
+    ggml_cannge_plan_io moved_io;
+    check(ggml_cannge_plan_analyze(&moved_graph, moved_io, err, options), "relocated view graph");
+    check(second_alias_key == ggml_cannge_plan_signature(&moved_graph, moved_io), "view topology key survives relocation");
+    external_view.op_params[0]++;
+    check(second_alias_key != ggml_cannge_plan_signature(&alias_graph.graph, alias_b), "external operation parameters in key");
+    external_view.op_params[0]--;
+    auto different_binding = alias_b;
+    different_binding.input_base[0] = &base_b;
+    check(second_alias_key != ggml_cannge_plan_signature(&alias_graph.graph, different_binding), "resolved base binding in key");
+    different_binding = alias_b;
+    different_binding.input_base_offset[0] = 4;
+    check(second_alias_key != ggml_cannge_plan_signature(&alias_graph.graph, different_binding), "resolved binding offset in key");
     std::puts("PASS: CANNGE plan stages and cache binding regressions");
 }

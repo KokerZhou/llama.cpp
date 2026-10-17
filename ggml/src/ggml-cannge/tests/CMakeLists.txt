@@ -10,7 +10,7 @@ target_compile_features(test-cannge-view PRIVATE cxx_std_17)
 target_include_directories(test-cannge-view PRIVATE .. ../../../include)
 add_test(NAME cannge-view COMMAND test-cannge-view)
 
-add_executable(test-cannge-plan test-plan.cpp metadata-stubs.cpp ../plan.cpp ../view.cpp ../options.cpp)
+add_executable(test-cannge-plan test-plan.cpp metadata-stubs.cpp ../plan.cpp ../plan-key.cpp ../view.cpp ../options.cpp)
 target_compile_features(test-cannge-plan PRIVATE cxx_std_17)
 target_include_directories(test-cannge-plan PRIVATE .. ../.. ../../../include)
 add_test(NAME cannge-plan COMMAND test-cannge-plan)

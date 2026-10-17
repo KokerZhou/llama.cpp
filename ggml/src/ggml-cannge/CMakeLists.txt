@@ -97,6 +97,7 @@ if (CANN_INSTALL_DIR)
                              view.cpp
                              view.h
                              plan.cpp
+                             plan-key.cpp
                              ge.cpp
                              graph-build.cpp
                              mul-mat.cpp
