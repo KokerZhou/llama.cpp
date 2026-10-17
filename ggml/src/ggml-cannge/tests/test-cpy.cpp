@@ -186,6 +186,49 @@ int main() {
     check(copy_calls == 0 && sparse[0] == 0x3c00, "failed bounce drain leaves destination unchanged");
 
     reset();
+    struct layout_case { int64_t ne[4]; size_t nb[4]; };
+    const layout_case layouts[] = {
+        {{3, 2, 1, 1}, {2, 6, 12, 12}},
+        {{3, 5, 1, 1}, {10, 2, 30, 30}},
+        {{19, 23, 1, 1}, {46, 2, 874, 874}},
+        {{3, 2, 2, 2}, {16, 2, 4, 8}},
+        {{3, 2, 2, 2}, {4, 16, 40, 96}},
+    };
+    for (const auto & layout : layouts) {
+        for (bool host_view : {false, true}) {
+            auto t = tensor(GGML_TYPE_F16, 1, 1, nullptr);
+            std::memcpy(t.ne, layout.ne, sizeof(t.ne));
+            std::memcpy(t.nb, layout.nb, sizeof(t.nb));
+            if (host_view) { t.buffer = reinterpret_cast<ggml_backend_buffer_t>(&t); }
+            std::vector<ggml_fp16_t> storage(ggml_nbytes(&t) / 2, 0x3555);
+            std::vector<ggml_fp16_t> expected(ggml_nelements(&t));
+            std::vector<size_t> offsets;
+            for (int64_t i3 = 0; i3 < t.ne[3]; i3++) {
+                for (int64_t i2 = 0; i2 < t.ne[2]; i2++) {
+                    for (int64_t i1 = 0; i1 < t.ne[1]; i1++) {
+                        for (int64_t i0 = 0; i0 < t.ne[0]; i0++) {
+                            offsets.push_back((i0 * t.nb[0] + i1 * t.nb[1] + i2 * t.nb[2] + i3 * t.nb[3]) / 2);
+                        }
+                    }
+                }
+            }
+            for (size_t i = 0; i < expected.size(); i++) {
+                expected[i] = ggml_fp32_to_fp16(float(i + 1));
+                storage[offsets[i]] = expected[i];
+            }
+            t.data = storage.data();
+            std::vector<ggml_fp16_t> gathered_half(expected.size(), 0);
+            reset();
+            check(ggml_cannge_strided_copy(&t, gathered_half.data(), false, nullptr), "host layout gather");
+            check(gathered_half == expected, "F16 gather matches independent element offsets");
+            const auto original = storage;
+            std::fill(storage.begin(), storage.end(), 0x3555);
+            check(ggml_cannge_strided_copy(&t, gathered_half.data(), true, nullptr), "host layout scatter");
+            check(storage == original, "F16 scatter restores elements and preserves gaps");
+            check(pending.empty(), "bounce copies leave no queued temporary storage");
+        }
+    }
+    reset();
     void * device = nullptr;
     void * host = nullptr;
     size_t capacity = 0;

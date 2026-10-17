@@ -271,6 +271,41 @@ static void ggml_cannge_repack_2d(char * out, size_t o_r, size_t o_c, const char
     }
 }
 
+static void ggml_cannge_repack_host(const ggml_tensor * t, char * destination, const char * source,
+                                     bool dense_to_strided) {
+    const size_t es = ggml_element_size(t);
+    const size_t slab = (size_t) t->ne[0] * es;
+    const int64_t rows = t->ne[1] * t->ne[2] * t->ne[3];
+    const bool transpose = t->nb[1] == es && t->nb[0] == (size_t) rows * es &&
+                           (t->ne[2] <= 1 || t->nb[2] == (size_t) t->ne[1] * es) &&
+                           (t->ne[3] <= 1 || t->nb[3] == (size_t) t->ne[1] * t->ne[2] * es);
+    if (transpose && t->nb[0] != es) {
+        const size_t view_pitch = (size_t) rows * es;
+        ggml_cannge_repack_2d(destination, dense_to_strided ? view_pitch : es, dense_to_strided ? es : slab,
+                             source, dense_to_strided ? es : view_pitch, dense_to_strided ? slab : es,
+                             t->ne[0], rows, es);
+        return;
+    }
+    for (int64_t row = 0; row < rows; row++) {
+        const int64_t i1 = row % t->ne[1];
+        const int64_t i2 = (row / t->ne[1]) % t->ne[2];
+        const int64_t i3 = row / (t->ne[1] * t->ne[2]);
+        const size_t view_offset = i1 * t->nb[1] + i2 * t->nb[2] + i3 * t->nb[3];
+        const size_t dense_offset = (size_t) row * slab;
+        char * dst = destination + (dense_to_strided ? view_offset : dense_offset);
+        const char * src = source + (dense_to_strided ? dense_offset : view_offset);
+        if (t->nb[0] == es) {
+            memcpy(dst, src, slab);
+        } else {
+            const size_t dst_pitch = dense_to_strided ? t->nb[0] : es;
+            const size_t src_pitch = dense_to_strided ? es : t->nb[0];
+            for (int64_t e = 0; e < t->ne[0]; e++) {
+                memcpy(dst + (size_t) e * dst_pitch, src + (size_t) e * src_pitch, es);
+            }
+        }
+    }
+}
+
 // copy between a strided ggml view layout and a compact dense buffer, via
 // ne1*ne2*ne3 element-granularity 2D copies (width = element size, height =
 // ne0, pitch = nb[0]); nb[0] can exceed the element size on permuted views
@@ -289,19 +324,10 @@ bool ggml_cannge_strided_copy(const ggml_tensor * t, void * dense, bool dense_to
         aligned_ok = t->nb[i] % 4 == 0;
     }
     if (!aligned_ok) {
-        // clean 2D-repack family: dims 1..3 form a contiguous inner extent
-        // C (standard strides) and dim0 carries stride C*es, so the whole
-        // footprint is one packed [ne0 x C] matrix to repack tiled; anything
-        // else falls back to the element gather
-        const int64_t C_elems   = t->ne[1] * t->ne[2] * t->ne[3];
-        const bool   repack2d   = t->nb[1] == (size_t) es && t->nb[0] == (size_t) C_elems * es &&
-                                (t->ne[2] <= 1 || t->nb[2] == (size_t) t->ne[1] * es) &&
-                                (t->ne[3] <= 1 || t->nb[3] == (size_t) t->ne[1] * t->ne[2] * es);
         if (getenv("GGML_CANNGE_DEBUG_COMPILE")) {
-            fprintf(stderr, "[DBG-COPY] bounce %s ne=%lld,%lld,%lld,%lld nb=%lld,%lld,%lld,%lld repack2d=%d\n",
+            fprintf(stderr, "[DBG-COPY] bounce %s ne=%lld,%lld,%lld,%lld nb=%lld,%lld,%lld,%lld\n",
                     t->name, (long long) t->ne[0], (long long) t->ne[1], (long long) t->ne[2], (long long) t->ne[3],
-                    (long long) t->nb[0], (long long) t->nb[1], (long long) t->nb[2], (long long) t->nb[3],
-                    (int) repack2d);
+                    (long long) t->nb[0], (long long) t->nb[1], (long long) t->nb[2], (long long) t->nb[3]);
         }
         int64_t off_last = 0;
         for (int i = 0; i < GGML_MAX_DIMS; i++) {
@@ -337,28 +363,7 @@ bool ggml_cannge_strided_copy(const ggml_tensor * t, void * dense, bool dense_to
                                       ACL_MEMCPY_DEVICE_TO_HOST), "aclrtMemcpy", __func__)) {
                 return false;
             }
-            if (repack2d && t->nb[0] != (size_t) es) {
-                // dense [ne0 x C] -> view layout (dim0 carries the C stride)
-                ggml_cannge_repack_2d(bounce.data(), (size_t) C_elems * es, es, dense_host.data(), es,
-                                      (size_t) t->ne[0] * es, t->ne[0], C_elems, es);
-            } else {
-                for (int64_t l = 0; l < n; l++) {
-                    const int64_t i1 = l % t->ne[1];
-                    const int64_t i2 = (l / t->ne[1]) % t->ne[2];
-                    const int64_t i3 = l / (t->ne[1] * t->ne[2]);
-                    char * dst = bounce.data() + i1 * t->nb[1] + i2 * t->nb[2] + i3 * t->nb[3];
-                    const char * src = dense_host.data() + (size_t) l * slab;
-                    // a view whose dim0 is not the memory-fastest dim (nb0 > es,
-                    // e.g. a transposed V cache view) needs element-wise scatter
-                    if (t->nb[0] == (size_t) es) {
-                        memcpy(dst, src, slab);
-                    } else {
-                        for (int64_t e = 0; e < t->ne[0]; e++) {
-                            memcpy(dst + (size_t) e * t->nb[0], src + (size_t) e * es, es);
-                        }
-                    }
-                }
-            }
+            ggml_cannge_repack_host(t, bounce.data(), dense_host.data(), true);
             if (host) {
                 memcpy(t->data, bounce.data(), span);
             } else {
@@ -367,54 +372,16 @@ bool ggml_cannge_strided_copy(const ggml_tensor * t, void * dense, bool dense_to
                 }
             }
         } else {
-            if (host) {
-                if (repack2d && t->nb[0] != (size_t) es) {
-                    ggml_cannge_repack_2d(bounce.data(), es, (size_t) t->ne[0] * es, (const char *) t->data,
-                                          (size_t) C_elems * es, es, t->ne[0], C_elems, es);
-                } else {
-                    for (int64_t l = 0; l < n; l++) {
-                        const int64_t i1 = l % t->ne[1];
-                        const int64_t i2 = (l / t->ne[1]) % t->ne[2];
-                        const int64_t i3 = l / (t->ne[1] * t->ne[2]);
-                        const char * src = (const char *) t->data + i1 * t->nb[1] + i2 * t->nb[2] + i3 * t->nb[3];
-                        char * dst = bounce.data() + (size_t) l * slab;
-                        if (t->nb[0] == (size_t) es) {
-                            memcpy(dst, src, slab);
-                        } else {
-                            for (int64_t e = 0; e < t->ne[0]; e++) {
-                                memcpy(dst + (size_t) e * es, src + (size_t) e * t->nb[0], es);
-                            }
-                        }
-                    }
-                }
-            } else {
-                // device-resident strided source: D2H the strided span into a
-                // host mirror, gather it into dense layout in bounce; the
-                // shared H2D below lands it in staging
-                std::vector<char> mirror(span);
+            std::vector<char> mirror;
+            const char * source = (const char *) t->data;
+            if (!host) {
+                mirror.resize(span);
                 if (!ggml_cannge_check(aclrtMemcpy(mirror.data(), span, t->data, span, ACL_MEMCPY_DEVICE_TO_HOST), "aclrtMemcpy", __func__)) {
                     return false;
                 }
-                if (repack2d && t->nb[0] != (size_t) es) {
-                    ggml_cannge_repack_2d(bounce.data(), es, (size_t) t->ne[0] * es, mirror.data(),
-                                          (size_t) C_elems * es, es, t->ne[0], C_elems, es);
-                } else {
-                    for (int64_t l = 0; l < n; l++) {
-                        const int64_t i1 = l % t->ne[1];
-                        const int64_t i2 = (l / t->ne[1]) % t->ne[2];
-                        const int64_t i3 = l / (t->ne[1] * t->ne[2]);
-                        const char * src = mirror.data() + i1 * t->nb[1] + i2 * t->nb[2] + i3 * t->nb[3];
-                        char * dst = bounce.data() + (size_t) l * slab;
-                        if (t->nb[0] == (size_t) es) {
-                            memcpy(dst, src, slab);
-                        } else {
-                            for (int64_t e = 0; e < t->ne[0]; e++) {
-                                memcpy(dst + (size_t) e * es, src + (size_t) e * t->nb[0], es);
-                            }
-                        }
-                    }
-                }
+                source = mirror.data();
             }
+            ggml_cannge_repack_host(t, bounce.data(), source, false);
             if (!ggml_cannge_check(aclrtMemcpy(dense, (size_t) n * slab, bounce.data(), (size_t) n * slab,
                                       ACL_MEMCPY_HOST_TO_DEVICE), "aclrtMemcpy", __func__)) {
                 return false;

@@ -29,5 +29,6 @@ bool ggml_is_contiguous(const ggml_tensor * t) {
     }
     return true;
 }
-bool ggml_backend_buffer_is_host(ggml_backend_buffer_t) { return false; }
+// Tests use null for device storage and a non-null sentinel for host storage.
+bool ggml_backend_buffer_is_host(ggml_backend_buffer_t buffer) { return buffer != nullptr; }
 const char * ggml_op_name(ggml_op) { return "test-op"; }
