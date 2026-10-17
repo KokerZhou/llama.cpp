@@ -246,5 +246,55 @@ int main() {
     activation.ne[3] = 1; activation.ne[1] = 2;
     check(!ggml_cannge_use_gemv(&weights, &activation, options), "matrix input is not GEMV");
 
+    auto query = f.tensors[0];
+    auto key_tensor = f.tensors[0];
+    auto value_tensor = f.tensors[0];
+    auto attention = f.tensors[0];
+    query.ne[0] = key_tensor.ne[0] = value_tensor.ne[0] = 64;
+    query.ne[2] = 8;
+    key_tensor.ne[2] = value_tensor.ne[2] = 2;
+    key_tensor.ne[1] = value_tensor.ne[1] = 16;
+    key_tensor.type = value_tensor.type = GGML_TYPE_F16;
+    attention.op = GGML_OP_FLASH_ATTN_EXT;
+    attention.src[0] = &query; attention.src[1] = &key_tensor; attention.src[2] = &value_tensor;
+    options = {}; options.flash_attention = true;
+    auto attention_reason = [&](const char * expected) {
+        const char * reason = "stale";
+        const bool supported = ggml_cannge_supports_op(&attention, options, &reason);
+        check(supported == (expected == nullptr), "attention support outcome");
+        check(expected == nullptr ? reason == nullptr : reason != nullptr && std::strcmp(reason, expected) == 0,
+              "attention constraint diagnostic");
+    };
+    attention_reason(nullptr);
+    key_tensor.ne[2] = 0;
+    attention_reason("flash attention requires positive matching KV heads and an integral query/KV head ratio");
+    key_tensor.ne[2] = 2; value_tensor.ne[2] = 1;
+    attention_reason("flash attention requires positive matching KV heads and an integral query/KV head ratio");
+    value_tensor.ne[2] = 2; query.ne[2] = 7;
+    attention_reason("flash attention requires positive matching KV heads and an integral query/KV head ratio");
+    query.ne[2] = 8;
+    for (auto * operand : {&query, &key_tensor, &value_tensor}) {
+        operand->ne[3] = 2;
+        attention_reason("flash attention supports batch size one only");
+        operand->ne[3] = 1;
+    }
+    query.ne[1] = 2;
+    attention_reason("flash attention supports decode only (query sequence length must be one)");
+    query.ne[1] = 1; query.ne[0] = 0;
+    attention_reason("flash attention head widths must match and be positive multiples of 16");
+    query.ne[0] = 64; value_tensor.ne[1] = 15;
+    attention_reason("flash attention key and value sequence lengths must match and be positive");
+    value_tensor.ne[1] = 16; attention.src[4] = &f.tensors[0];
+    attention_reason("flash attention sinks are unsupported");
+    attention.src[4] = nullptr;
+    float unsupported_bias = 1.0f;
+    std::memcpy(attention.op_params + 1, &unsupported_bias, sizeof(unsupported_bias));
+    attention_reason("flash attention ALiBi is unsupported");
+    attention.op_params[1] = 0;
+    std::memcpy(attention.op_params + 2, &unsupported_bias, sizeof(unsupported_bias));
+    attention_reason("flash attention softcapping is unsupported");
+    attention.op_params[2] = 0;
+    attention_reason(nullptr);
+
     std::puts("PASS: CANNGE plan stages and cache binding regressions");
 }

@@ -395,63 +395,54 @@ static bool ggml_cannge_supports_rope(const ggml_tensor * op) {
     return ok;
 }
 
-static bool ggml_cannge_supports_attention(const ggml_tensor * op) {
-    const ggml_tensor * src0 = op->src[0];
-    const ggml_tensor * src1 = op->src[1];
-    // attention on device via GE IFA (BSND decode); K/V must be f16
-    // and stay resident (cache views) - no host round-trip. Opt-in:
-    // only s_q == 1 (decode) is claimed - IFA is bit-exact there
-    // (probe fa). PFA (s_q > 1) silently reads BNSD despite the
-    // layout string (probe fa anatomy, note-42), so prefill falls
-    // back to the kq_soft_max path
-    const struct ggml_tensor * src2 = op->src[2];
-    if (src0 == nullptr || src1 == nullptr || src2 == nullptr || op->src[4] != nullptr) {
-        return false; // sinks unsupported
+static const char * ggml_cannge_attention_rejection(const ggml_tensor * op) {
+    const ggml_tensor * query = op->src[0];
+    const ggml_tensor * key = op->src[1];
+    const ggml_tensor * value = op->src[2];
+    const ggml_tensor * mask = op->src[3];
+    if (query == nullptr || key == nullptr || value == nullptr) {
+        return "flash attention requires query, key and value tensors";
     }
-    if (src0->ne[1] != 1) {
-        if (getenv("GGML_CANNGE_DEBUG_COMPILE")) fprintf(stderr, "[DBG-GATE] fa reject-A prefill s_q=%lld\n", (long long) src0->ne[1]);
-        return false;
+    if (op->src[4] != nullptr) {
+        return "flash attention sinks are unsupported";
     }
-    if (src1->type != GGML_TYPE_F16 || src2->type != GGML_TYPE_F16) {
-        if (getenv("GGML_CANNGE_DEBUG_COMPILE")) fprintf(stderr, "[DBG-GATE] fa reject-B kv type\n");
-        return false;
+    // Prefill remains disabled because the GE PFA layout path failed model validation.
+    if (query->ne[1] != 1) {
+        return "flash attention supports decode only (query sequence length must be one)";
     }
-    if (src0->type != GGML_TYPE_F16 && src0->type != GGML_TYPE_F32) {
-        if (getenv("GGML_CANNGE_DEBUG_COMPILE")) fprintf(stderr, "[DBG-GATE] fa reject-C q type\n");
-        return false;
+    if (key->type != GGML_TYPE_F16 || value->type != GGML_TYPE_F16) {
+        return "flash attention key and value must be F16";
     }
-    // ggml FA output dtype follows the precision flag (F32 default),
-    // independent of the f16 q/k/v inputs
-    if (op->type != GGML_TYPE_F16 && op->type != GGML_TYPE_F32) {
-        return false;
+    if (!ggml_cannge_float_dtype(query->type) || !ggml_cannge_float_dtype(op->type)) {
+        return "flash attention query and output must be F16/F32";
     }
     float max_bias = 0.0f, softcap = 0.0f;
     std::memcpy(&max_bias, (const float *) op->op_params + 1, sizeof(max_bias));
     std::memcpy(&softcap, (const float *) op->op_params + 2, sizeof(softcap));
-    if (max_bias != 0.0f || softcap != 0.0f) {
-        return false; // ALiBi / softcapping unsupported
+    if (max_bias != 0.0f) {
+        return "flash attention ALiBi is unsupported";
     }
-    const int64_t d = src0->ne[0];
-    if (d % 16 != 0 || d != src1->ne[0] || d != src2->ne[0] || src0->ne[2] % src1->ne[2] != 0) {
-        if (getenv("GGML_CANNGE_DEBUG_COMPILE")) fprintf(stderr, "[DBG-GATE] fa reject-D dims\n");
-        return false; // head dim alignment + GQA ratio
+    if (softcap != 0.0f) {
+        return "flash attention softcapping is unsupported";
     }
-    if (src1->ne[1] != src2->ne[1] || src0->ne[3] != 1) {
-        if (getenv("GGML_CANNGE_DEBUG_COMPILE")) fprintf(stderr, "[DBG-GATE] fa reject-E s/ndims\n");
-        return false;
+    const int64_t width = query->ne[0];
+    if (width <= 0 || width % 16 != 0 || width != key->ne[0] || width != value->ne[0]) {
+        return "flash attention head widths must match and be positive multiples of 16";
     }
-    const struct ggml_tensor * src3 = op->src[3];
-    if (src3 != nullptr && src3->type != GGML_TYPE_F16 && src3->type != GGML_TYPE_F32) {
-        return false;
+    if (query->ne[2] <= 0 || key->ne[2] <= 0 || key->ne[2] != value->ne[2] ||
+        query->ne[2] % key->ne[2] != 0) {
+        return "flash attention requires positive matching KV heads and an integral query/KV head ratio";
     }
-    if (getenv("GGML_CANNGE_DEBUG_COMPILE")) {
-        fprintf(stderr, "[DBG-GATE] fa %s accept ne=%lld,%lld,%lld,%lld ne1=%lld,%lld ne2=%lld,%lld t=%d/%d/%d mt=%d\n",
-                op->name, (long long) src0->ne[0], (long long) src0->ne[1], (long long) src0->ne[2],
-                (long long) src0->ne[3], (long long) src1->ne[1], (long long) src1->ne[2],
-                (long long) src2->ne[1], (long long) src2->ne[2], (int) src0->type, (int) src1->type,
-                (int) op->type, src3 ? (int) src3->type : -1);
+    if (key->ne[1] <= 0 || key->ne[1] != value->ne[1]) {
+        return "flash attention key and value sequence lengths must match and be positive";
     }
-    return true;
+    if (query->ne[3] != 1 || key->ne[3] != 1 || value->ne[3] != 1) {
+        return "flash attention supports batch size one only";
+    }
+    if (mask != nullptr && !ggml_cannge_float_dtype(mask->type)) {
+        return "flash attention mask must be F16/F32";
+    }
+    return nullptr;
 }
 
 // L0 static capability table (docs/cannge D3): doc-supported (op, dtype,
@@ -587,8 +578,10 @@ bool ggml_cannge_supports_op(const ggml_tensor * op, const ggml_cannge_options &
         case GGML_OP_ROPE:
             return accept(ggml_cannge_supports_rope(op), "RoPE type, layout or parameters are unsupported");
 
-        case GGML_OP_FLASH_ATTN_EXT:
-            return accept(ggml_cannge_supports_attention(op), "flash-attention type, sequence or head dimensions are unsupported");
+        case GGML_OP_FLASH_ATTN_EXT: {
+            const char * rejection = ggml_cannge_attention_rejection(op);
+            return accept(rejection == nullptr, rejection);
+        }
 
         default:
             return accept(false, "operation has no CANNGE mapping");
