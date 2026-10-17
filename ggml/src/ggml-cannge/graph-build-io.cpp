@@ -21,17 +21,6 @@ bool ggml_cannge_build_inputs(ggml_cannge_build_context & ctx) {
     return true;
 }
 
-// mirror of plan.cpp's static predicate (not exported there)
-static bool ggml_cannge_is_rearrange_view_local(const ggml_tensor * t) {
-    for (const ggml_tensor * cur = t; cur != nullptr && cur->view_src != nullptr; cur = cur->view_src) {
-        if (cur->op != GGML_OP_RESHAPE && cur->op != GGML_OP_PERMUTE && cur->op != GGML_OP_TRANSPOSE &&
-            cur->op != GGML_OP_VIEW && cur->op != GGML_OP_NONE) {
-            return false;
-        }
-    }
-    return true;
-}
-
 // --- fresh-row splice (note-50 batch K) -------------------------------------
 // The KV cache view chains read the cache INPUT, but the SET_ROWS write lands
 // post-execute: an in-fragment consumer sees every slot except the current
@@ -94,7 +83,7 @@ static ggml_cannge_build_result ggml_cannge_build_cont_chain_impl(ggml_cannge_bu
     if (ctx.get(v, h)) {
         return ggml_cannge_splice_fresh_row(ctx, t, v, h) ? ggml_cannge_build_result::success : ggml_cannge_build_result::failure;
     }
-    if (!ggml_cannge_is_rearrange_view_local(v)) {
+    if (!ggml_cannge_is_rearrange_view(v)) {
         return ggml_cannge_build_result::not_applicable;
     }
     std::vector<ggml_tensor *> chain;

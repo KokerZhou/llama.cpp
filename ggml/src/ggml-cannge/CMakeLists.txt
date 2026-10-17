@@ -94,6 +94,8 @@ if (CANN_INSTALL_DIR)
                              graph.cpp
                              cpy.cpp
                              supports.cpp
+                             view.cpp
+                             view.h
                              plan.cpp
                              ge.cpp
                              graph-build.cpp

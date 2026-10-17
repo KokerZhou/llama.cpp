@@ -11,7 +11,8 @@ The layout follows the sibling CPU/CUDA backends: a backend entry point, shared 
 | `supports.cpp` | Scheduling policy and per-operation capability predicates |
 | `options.cpp` / `options.h` | Parsed graph configuration and its cache signature |
 | `cpy.cpp` | Layout conversion, staging allocation and row scatter |
-| `plan.cpp` | Per-call IO analysis, alias resolution and cache signatures |
+| `plan.cpp` | Per-call IO analysis and cache signatures |
+| `view.cpp` / `view.h` | Shared view metadata, cycle detection and registered-base selection |
 | `ge.cpp` | GE initialization, sessions and graph lifecycle |
 | `common.cpp` / `common.h` | Shared ACL diagnostics, constants and timing |
 | `ops.cpp` / `ops.h` | Operation dispatch |
@@ -70,3 +71,12 @@ The execution context owns the GE session and cached plans. Plans own staging al
 ## Validation boundaries
 
 SDK-free tests can check support decisions, allocation failure handling, layout copies and deferred-copy lifetimes. Stub compilation checks C++ structure only. A real CANN SDK build, device correctness tests and performance measurements are required before treating changes as hardware-validated.
+
+
+The persistent metadata regression target in `tests/` builds without CANN or GE. It compiles the production `view.cpp` with small ggml metadata stubs; it does not test device execution. From the repository root:
+
+```sh
+cmake -S ggml/src/ggml-cannge/tests -B build-cannge-metadata
+cmake --build build-cannge-metadata --config Release
+ctest --test-dir build-cannge-metadata -C Release --output-on-failure
+```
