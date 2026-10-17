@@ -51,6 +51,9 @@ struct ggml_cannge_build_context {
     }
 
     bool get(ggml_tensor * t, cannge_es::EsTensorHolder & holder) {
+        if (t == nullptr) {
+            return fail("missing source tensor");
+        }
         auto it = tensors.find(t);
         if (it == tensors.end()) {
             // CONT of a rearrange view (merged-attention V path): relabel

@@ -58,7 +58,10 @@ bool ggml_cannge_graph_build(ggml_cannge_plan & plan, ggml_cannge_plan_io & io, 
                         ggml_op_name(node->op), (long long) node->ne[0], (long long) node->ne[1],
                         (long long) node->ne[2], (long long) node->ne[3]);
             }
+            err.clear();
             if (!ggml_cannge_build_node(ctx, node)) {
+                const std::string detail = err.empty() ? "builder returned no reason" : err;
+                err = "node[" + std::to_string(i) + "] " + node->name + " (" + ggml_op_name(node->op) + "): " + detail;
                 if (getenv("GGML_CANNGE_DEBUG_BUILD")) {
                     fprintf(stderr, "[DBG-BUILD] node %s op=%s failed: %s\n", node->name, ggml_op_name(node->op),
                             err.c_str());

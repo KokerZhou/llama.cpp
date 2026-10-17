@@ -754,8 +754,9 @@ enum ggml_status ggml_backend_cannge_graph_compute(ggml_backend_t backend, ggml_
                     node->src[1]->name, (long long) node->src[1]->ne[0], (long long) node->src[1]->ne[1],
                     (long long) node->src[1]->ne[2], (long long) node->src[1]->ne[3]);
         }
-        if (!ggml_cannge_supports_op(node, options)) {
-            GGML_LOG_ERROR("%s: op %d not supported by CANNGE\n", __func__, (int) node->op);
+        const char * reason = nullptr;
+        if (!ggml_cannge_supports_op(node, options, &reason)) {
+            GGML_LOG_ERROR("%s: %s (%s) rejected: %s\n", __func__, node->name, ggml_op_name(node->op), reason);
             return GGML_STATUS_FAILED;
         }
     }

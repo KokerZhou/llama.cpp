@@ -457,10 +457,19 @@ static bool ggml_cannge_supports_attention(const ggml_tensor * op) {
 // L0 static capability table (docs/cannge D3): doc-supported (op, dtype,
 // shape) combos only, conservative rejects are by design; GE adds/Mul broadcast
 // dims that are equal or 1, MatMul contraction is ne0 of both operands
-bool ggml_cannge_supports_op(const ggml_tensor * op, const ggml_cannge_options & options) {
+bool ggml_cannge_supports_op(const ggml_tensor * op, const ggml_cannge_options & options, const char ** reason) {
+    if (reason != nullptr) {
+        *reason = nullptr;
+    }
+    auto accept = [&](bool supported, const char * detail) {
+        if (!supported && reason != nullptr) {
+            *reason = detail;
+        }
+        return supported;
+    };
 
     if (!ggml_backend_cannge_graph_env_enabled()) {
-        return false;
+        return accept(false, "GGML_CANNGE_GRAPH is disabled");
     }
 
     // leaf tensors carry no compute, every backend accepts them
@@ -480,10 +489,7 @@ bool ggml_cannge_supports_op(const ggml_tensor * op, const ggml_cannge_options &
     // debug knob: reject every compute op, isolates backend-presence effects
     // (buffer assignment, boundary copies) from op-mapping correctness
     if (const char * option = ggml_cannge_disabled_by(op, options)) {
-        if (getenv("GGML_CANNGE_DEBUG_COMPILE")) {
-            GGML_LOG_DEBUG("CANNGE: %s (%s) disabled by %s\n", op->name, ggml_op_name(op->op), option);
-        }
-        return false;
+        return accept(false, option);
     }
 
     // in-place variants write the result back into src[i]'s buffer; GE
@@ -493,13 +499,13 @@ bool ggml_cannge_supports_op(const ggml_tensor * op, const ggml_cannge_options &
     // SET_ROWS also views its target (src[2]), but the write is applied by
     // the backend explicitly after execute, so it is exempt as well
     if (op->view_src != nullptr && op->op != GGML_OP_CPY && op->op != GGML_OP_SET_ROWS) {
-        return false;
+        return accept(false, "aliased output is unsupported");
     }
     for (int i = 0; i < GGML_MAX_SRC; i++) {
         // ggml encodes the CPY destination as src[1] = the node itself - not
         // an in-place hazard (the gate's CPY case checks the real src0/src1)
         if (op->src[i] == op && op->op != GGML_OP_CPY) {
-            return false;
+            return accept(false, "self-referencing source is unsupported");
         }
     }
 
@@ -510,19 +516,19 @@ bool ggml_cannge_supports_op(const ggml_tensor * op, const ggml_cannge_options &
         case GGML_OP_SUB:
         case GGML_OP_MUL:
         case GGML_OP_DIV:
-            return ggml_cannge_supports_binary(op);
+            return accept(ggml_cannge_supports_binary(op), "binary tensors must be F16/F32 with equal-or-one broadcast dimensions");
 
         case GGML_OP_SCALE:
-            return src0 != nullptr && ggml_cannge_float_dtype(src0->type) && ggml_cannge_float_dtype(op->type);
+            return accept(src0 != nullptr && ggml_cannge_float_dtype(src0->type) && ggml_cannge_float_dtype(op->type), "source and output must be F16/F32");
 
         case GGML_OP_SOFT_MAX:
-            return ggml_cannge_supports_softmax(op);
+            return accept(ggml_cannge_supports_softmax(op), "softmax requires F16/F32 tensors, compatible mask dimensions, no sinks and no ALiBi");
 
         case GGML_OP_UNARY:
-            return ggml_cannge_supports_unary(op);
+            return accept(ggml_cannge_supports_unary(op), "unary tensor type or activation is unsupported");
 
         case GGML_OP_NORM:
-            return src0 != nullptr && ggml_cannge_float_dtype(src0->type) && ggml_cannge_float_dtype(op->type);
+            return accept(src0 != nullptr && ggml_cannge_float_dtype(src0->type) && ggml_cannge_float_dtype(op->type), "source and output must be F16/F32");
 
         case GGML_OP_RMS_NORM:
             // the ADD->RMS->(weight MUL) merged-subgraph corruption this gate
@@ -530,10 +536,10 @@ bool ggml_cannge_supports_op(const ggml_tensor * op, const ggml_cannge_options &
             // tensors consumed both in-split and cross-split got no GE output
             // port, so cross-split consumers read stale ggml buffers (fixed
             // in ggml-backend.cpp split pass, note-44)
-            return src0 != nullptr && ggml_cannge_float_dtype(src0->type) && ggml_cannge_float_dtype(op->type);
+            return accept(src0 != nullptr && ggml_cannge_float_dtype(src0->type) && ggml_cannge_float_dtype(op->type), "source and output must be F16/F32");
 
         case GGML_OP_MUL_MAT:
-            return ggml_cannge_supports_matmul(op, options);
+            return accept(ggml_cannge_supports_matmul(op, options), "matmul type, contraction, alignment, batch dimensions or configured size limit is unsupported");
 
         case GGML_OP_CONT:
             // non-contiguous CONT opts into the merged attention
@@ -542,14 +548,14 @@ bool ggml_cannge_supports_op(const ggml_tensor * op, const ggml_cannge_options &
             // at model scale while the isolated probe is exact - root cause
             // under investigation (note-52). Default stays split (coherent).
             if (!options.contiguous_views) {
-                return src0 != nullptr && ggml_cannge_float_dtype(src0->type) && ggml_cannge_float_dtype(op->type) &&
-                       ggml_is_contiguous(src0);
+                return accept(src0 != nullptr && ggml_cannge_float_dtype(src0->type) && ggml_cannge_float_dtype(op->type) &&
+                              ggml_is_contiguous(src0), "CONT requires a dense F16/F32 source unless GGML_CANNGE_CONT_NC is set");
             }
-            return src0 != nullptr && ggml_cannge_float_dtype(src0->type) && ggml_cannge_float_dtype(op->type) &&
-                   ggml_nelements(src0) == ggml_nelements(op);
+            return accept(src0 != nullptr && ggml_cannge_float_dtype(src0->type) && ggml_cannge_float_dtype(op->type) &&
+                          ggml_nelements(src0) == ggml_nelements(op), "CONT requires F16/F32 tensors with equal element counts");
 
         case GGML_OP_CPY:
-            return ggml_cannge_supports_copy(op);
+            return accept(ggml_cannge_supports_copy(op), "copy requires F16/F32 tensors with matching shapes and a dense, non-view destination");
 
         case GGML_OP_DUP:
             // same-dtype copy into the node's own buffer (in-place variants are
@@ -558,42 +564,47 @@ bool ggml_cannge_supports_op(const ggml_tensor * op, const ggml_cannge_options &
             // non-dense src0 keeps failing numerics through the alias+port
             // path (unlike ADD/MUL which consume the staged input in a real
             // op) - reject it, contiguous copies stay supported
-            return src0 != nullptr && ggml_cannge_float_dtype(src0->type) && ggml_cannge_float_dtype(op->type) &&
-                   ggml_is_contiguous(src0);
+            return accept(src0 != nullptr && ggml_cannge_float_dtype(src0->type) && ggml_cannge_float_dtype(op->type) &&
+                          ggml_is_contiguous(src0), "DUP requires a dense F16/F32 source and F16/F32 output");
 
         case GGML_OP_GET_ROWS:
             // single-row tables miscompile on GE: GatherV2 infers a [1,1]
             // output and GE writes one element, the ggml buffer stays zero
             // (probe ggml_probe_gr0, 910B3 repro; embedding gather unaffected)
             if (src0 != nullptr && src0->ne[1] == 1) {
-                return false;
+                return accept(false, "single-row GET_ROWS tables miscompile on GE");
             }
-            return src0 != nullptr && src1 != nullptr && ggml_cannge_float_dtype(src0->type) &&
-                   src1->type == GGML_TYPE_I32 && ggml_cannge_float_dtype(op->type);
+            return accept(src0 != nullptr && src1 != nullptr && ggml_cannge_float_dtype(src0->type) &&
+                          src1->type == GGML_TYPE_I32 && ggml_cannge_float_dtype(op->type), "GET_ROWS requires F16/F32 data and I32 indices");
 
         case GGML_OP_SET_ROWS:
-            return ggml_cannge_supports_set_rows(op);
+            return accept(ggml_cannge_supports_set_rows(op), "set_rows requires F16/F32 rows, I32/I64 indices and compatible dense destination layout");
 
         case GGML_OP_CONCAT:
-            return ggml_cannge_supports_concat(op);
+            return accept(ggml_cannge_supports_concat(op), "concat type, axis or non-concatenated dimensions are unsupported");
 
         case GGML_OP_GLU:
-            return ggml_cannge_supports_glu(op);
+            return accept(ggml_cannge_supports_glu(op), "GLU type, activation, split dimensions or swapped mode is unsupported");
 
         case GGML_OP_ROPE:
-            return ggml_cannge_supports_rope(op);
+            return accept(ggml_cannge_supports_rope(op), "RoPE type, layout or parameters are unsupported");
 
         case GGML_OP_FLASH_ATTN_EXT:
-            return ggml_cannge_supports_attention(op);
+            return accept(ggml_cannge_supports_attention(op), "flash-attention type, sequence or head dimensions are unsupported");
 
         default:
-            return false;
+            return accept(false, "operation has no CANNGE mapping");
     }
 }
 
 bool ggml_backend_cannge_device_supports_op(ggml_backend_dev_t dev, const ggml_tensor * op) {
     GGML_UNUSED(dev);
-    return ggml_cannge_supports_op(op, ggml_cannge_options::from_env());
+    const char * reason = nullptr;
+    const bool supported = ggml_cannge_supports_op(op, ggml_cannge_options::from_env(), &reason);
+    if (!supported && getenv("GGML_CANNGE_DEBUG_COMPILE")) {
+        GGML_LOG_DEBUG("CANNGE: %s (%s) rejected: %s\n", op->name, ggml_op_name(op->op), reason);
+    }
+    return supported;
 }
 
 bool ggml_backend_cannge_device_supports_buft(ggml_backend_dev_t dev, ggml_backend_buffer_type_t buft) {

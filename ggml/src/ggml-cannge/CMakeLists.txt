@@ -83,6 +83,14 @@ if (CANN_INSTALL_DIR)
                              options.cpp
                              options.h
                              ops.cpp
+                             elementwise.cpp
+                             elementwise.h
+                             norm.cpp
+                             norm.h
+                             tensor.cpp
+                             tensor.h
+                             rope.cpp
+                             rope.h
                              graph.cpp
                              cpy.cpp
                              supports.cpp

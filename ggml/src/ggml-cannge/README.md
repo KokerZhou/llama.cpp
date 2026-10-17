@@ -14,7 +14,11 @@ The layout follows the sibling CPU/CUDA backends: a backend entry point, shared 
 | `plan.cpp` | Per-call IO analysis, alias resolution and cache signatures |
 | `ge.cpp` | GE initialization, sessions and graph lifecycle |
 | `common.cpp` / `common.h` | Shared ACL diagnostics, constants and timing |
-| `ops.cpp` / `ops.h` | Operation dispatch and general ES mappings |
+| `ops.cpp` / `ops.h` | Operation dispatch |
+| `elementwise.cpp` | Binary arithmetic, scaling, unary activations and GLU |
+| `norm.cpp` | Softmax, RMS normalization and layer normalization |
+| `tensor.cpp` | Views, copies, row access and concatenation |
+| `rope.cpp` | Rotary position embedding |
 | `graph-build.cpp` | Assemble graph inputs, nodes and output ports |
 | `mul-mat.cpp` | Matrix multiplication, GEMV and associated cache-row splicing |
 | `fattn.cpp` | Flash-attention mapping |
@@ -34,7 +38,7 @@ The dependency flow is `ggml-cannge.cpp -> graph.cpp -> graph-build.cpp -> ops.c
 4. Alias restrictions are checked.
 5. A named operation predicate checks the supported types, shapes and parameters.
 
-The existing environment-variable behavior is preserved. Most disable flags test presence: setting one to `0` still disables the operation. `GGML_CANNGE_FA` also tests presence. `GGML_CANNGE_GQA` accepts `kq`, `v` or `all` in the capability check. Shape-specific workarounds remain beside the relevant predicate.
+The existing environment-variable behavior is preserved. Most disable flags test presence: setting one to `0` still disables the operation. `GGML_CANNGE_FA` also tests presence. `GGML_CANNGE_GQA` accepts `kq`, `v` or `all` in the capability check. Shape-specific workarounds remain beside the relevant predicate. The optional reason output of `ggml_cannge_supports_op` identifies the disabling option or failed constraint category; it is null on success. Scheduler diagnostics log rejections under `GGML_CANNGE_DEBUG_COMPILE`, while execution pre-check failures always report the tensor name, operation and reason.
 
 Use `GGML_CANNGE_DEBUG_COMPILE` to see policy rejections and compilation diagnostics, `GGML_CANNGE_DEBUG_BUILD` for graph mapping, `GGML_CANNGE_DEBUG_IO` for transfer checksums, and `GGML_CANNGE_DEBUG_TIMING` for timing totals. These diagnostics can synchronize or copy device data and are unsuitable for performance measurements.
 
@@ -44,7 +48,7 @@ When adding a graph-affecting option, add its field, environment parsing and sig
 
 ## Execution stages
 
-`ggml_backend_cannge_graph_compute` coordinates capability checks and IO analysis, then calls separate stages for plan preparation, input binding, output binding, index snapshots, GE execution and output completion. Verbose IO diagnostics are separate from this orchestration.
+`ggml_backend_cannge_graph_compute` coordinates capability checks and IO analysis, then calls separate stages for plan preparation, input binding, output binding, index snapshots, GE execution and output completion. Verbose IO diagnostics are separate from this orchestration. Operation builders that return failure report the node index, tensor name and operation, even when debug logging is disabled. Missing source tensors return a build error.
 
 Plan preparation includes cache lookup, compilation and loading. Timing totals therefore include loading in `lookup`, rather than `bind`. Input-binding timestamps retain the distinction between staging and its synchronization.
 
