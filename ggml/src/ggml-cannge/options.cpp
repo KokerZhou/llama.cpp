@@ -36,8 +36,10 @@ ggml_cannge_options ggml_cannge_options::from_env() {
     options.contiguous_views = std::getenv("GGML_CANNGE_CONT_NC") != nullptr;
     options.disable_contiguous_views = std::getenv("GGML_CANNGE_NO_CONT_NC") != nullptr;
     options.disable_splice = std::getenv("GGML_CANNGE_NO_SPLICE") != nullptr;
-    options.scatter = std::getenv("GGML_CANNGE_SCATTER") != nullptr;
+    options.scatter = std::getenv("GGML_CANNGE_SCATTER") != nullptr &&
+                      std::getenv("GGML_CANNGE_NO_SCATTER") == nullptr;
     options.scatter_add_zero = std::getenv("GGML_CANNGE_SR_ADD0") != nullptr;
+    options.gemv_bmm = std::getenv("GGML_CANNGE_BMM_GEMV") != nullptr;
     options.attention_input_permute = std::getenv("GGML_CANNGE_FA_INPERM") != nullptr;
     options.attention_output_permute = std::getenv("GGML_CANNGE_FA_OUTPERM") != nullptr;
     options.attention_ifa_all = std::getenv("GGML_CANNGE_FA_IFA_ALL") != nullptr;
@@ -82,6 +84,7 @@ std::string ggml_cannge_options::signature() const {
     boolean(disable_splice);
     boolean(scatter);
     boolean(scatter_add_zero);
+    boolean(gemv_bmm);
     boolean(attention_input_permute);
     boolean(attention_output_permute);
     boolean(attention_ifa_all);

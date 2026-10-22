@@ -1,5 +1,7 @@
 #include "graph-build-priv.h"
 #include "tensor.h"
+#include "mul-mat.h"
+#include "supports.h"
 #include "ggml-impl.h"
 #include "ggml-cannge-impl.h"
 
@@ -21,6 +23,26 @@ static ggml_tensor tensor() {
     return t;
 }
 int main() {
+    for (int rank : {2, 3, 4}) {
+        ggml_cannge_plan_io matmul_io;
+        std::string matmul_error;
+        ggml_cannge_build_context matmul_ctx(matmul_io, matmul_error);
+        auto weights = tensor(), input = tensor(), output = tensor();
+        weights.ne[0] = weights.ne[1] = input.ne[0] = 16;
+        input.ne[1] = 8;
+        if (rank >= 3) { weights.ne[2] = input.ne[2] = 2; }
+        if (rank == 4) { weights.ne[3] = input.ne[3] = 2; }
+        output.op = GGML_OP_MUL_MAT;
+        output.src[0] = &weights; output.src[1] = &input;
+        matmul_ctx.tensors[&weights] = {1}; matmul_ctx.tensors[&input] = {2};
+        ge::es::concat_calls = ge::es::slice_calls = 0;
+        check(ggml_cannge_build_matmul(matmul_ctx, &output), "build F32 matmul with M=8");
+        check(ge::es::concat_calls == (rank == 2 ? 1 : 0), "only rank-2 matmul pads M");
+        check(ge::es::slice_calls == (rank == 2 ? 1 : 0), "only rank-2 matmul slices M");
+        if (rank == 2) {
+            check(ge::es::last_slice_size == std::vector<int64_t>({8, 16}), "padding restores output shape");
+        }
+    }
     using result = ggml_cannge_build_result;
     ggml_cannge_plan_io io;
     std::string error = "prior diagnostic";
@@ -94,6 +116,29 @@ int main() {
     check(ggml_cannge_build_tensor(ctx, &scatter) && ctx.tensors[&rows].id != 10000,
           "scatter materializes available rows");
     check(ctx.try_get(nullptr, holder) == result::failure, "null source is a failure");
+    for (ggml_type type : {GGML_TYPE_F16, GGML_TYPE_F32}) {
+        auto source = tensor();
+        source.type = type;
+        auto index = tensor();
+        index.type = GGML_TYPE_I32;
+        index.ne[1] = 1;
+        auto gathered = tensor();
+        gathered.op = GGML_OP_GET_ROWS;
+        gathered.src[0] = &source;
+        gathered.src[1] = &index;
+        ctx.tensors[&source] = {1};
+        ctx.tensors[&index] = {2};
+        for (int64_t count : {1, 2}) {
+            index.ne[0] = gathered.ne[1] = count;
+            cannge_es::last_reshape_shape.clear();
+            check(ggml_cannge_build_tensor(ctx, &gathered), "gather builds");
+            const std::vector<int64_t> expected = count == 1 ? std::vector<int64_t>{4} : std::vector<int64_t>{2, 4};
+            check(cannge_es::last_reshape_shape == expected, "gather output rank matches downstream ggml axes");
+        }
+        ctx.tensors.erase(&source);
+        ctx.tensors.erase(&index);
+        ctx.tensors.erase(&gathered);
+    }
     ggml_cannge_plan plan;
     ggml_cannge_plan_io assembly_io;
     auto second = tensor();

@@ -41,9 +41,9 @@ ggml_cannge_dbg_timing::~ggml_cannge_dbg_timing() {
 
 void ggml_cannge_dbg_timing::dump() {
     if (!on || calls == 0) return;
-    fprintf(stderr, "[DBG-TIME] calls=%lld analyze=%.1f sig=%.1f find=%.1f bind=%.1f(stage=%.1f+sync=%.1f+obind=%.1f) exec=%.1f post=%.1f total=%.1f | cpy n=%lld sync=%.1f ms | staged=%.0f MB\n",
+    fprintf(stderr, "[DBG-TIME] calls=%lld analyze=%.1f sig=%.1f find=%.1f bind=%.1f(stage=%.1f+sync=%.1f+obind=%.1f) exec=%.1f post=%.1f total=%.1f | cpy n=%lld sync=%.1f ms | staged=%.0f MB | backend_sync n=%lld %.1f ms\n",
             calls, analyze, sig, find, bind, stage, stage_sync, obind, exec, post, total, cpy_calls, cpy_sync,
-            stage_bytes / 1e6);
+            stage_bytes / 1e6, sync_calls, sync_ms);
     std::vector<std::pair<double, std::string>> top;
     top.reserve(stage_names.size());
     for (const auto & kv : stage_names) {

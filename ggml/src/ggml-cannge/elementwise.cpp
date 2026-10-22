@@ -94,8 +94,8 @@ bool ggml_cannge_build_elementwise(ggml_cannge_build_context & ctx, ggml_tensor 
             std::memcpy(&s, (const float *) node->op_params + 0, sizeof(s));
             std::memcpy(&b, (const float *) node->op_params + 1, sizeof(b));
             // ggml: dst = src0 * s + b (ggml-cpu ops.cpp ggml_compute_forward_scale_f32)
-            auto scaled = cannge_es::Mul(es0, ctx.builder.CreateScalar(s));
-            ctx.tensors[node] = b == 0.0f ? scaled : cannge_es::Add(scaled, ctx.builder.CreateScalar(b));
+            auto scaled = cannge_es::Mul(es0, ctx.scalar_cached(s));
+            ctx.tensors[node] = b == 0.0f ? scaled : cannge_es::Add(scaled, ctx.scalar_cached(b));
             return true;
         }
 

@@ -53,9 +53,9 @@ bool ggml_cannge_onehot_slot(ggml_cannge_build_context & ctx, cannge_es::EsTenso
     for (int64_t i = 0; i < S; i++) {
         iota[i] = (float) i;
     }
-    auto arange = ctx.builder.CreateConst(iota, std::vector<int64_t>{ S });
+    auto arange = ctx.const_cached(iota, std::vector<int64_t>{ S });
     auto idxf   = idx->type == GGML_TYPE_F32 ? idxh : cannge_es::Cast(idxh, (int64_t) f32);
-    auto onef   = ctx.builder.CreateConst(std::vector<float>(S, 1.0f), std::vector<int64_t>{ S });
+    auto onef   = ctx.const_cached(std::vector<float>(S, 1.0f), std::vector<int64_t>{ S });
     mask        = cannge_es::Relu(cannge_es::Sub(onef, cannge_es::Abs(cannge_es::Sub(arange, idxf))));
     return true;
 }
@@ -150,7 +150,7 @@ static bool ggml_cannge_splice_fresh_row(ggml_cannge_build_context & ctx, ggml_t
         auto m3  = cannge_es::Reshape(m, std::vector<int64_t>{ 1, 1, S });
         auto r3  = cannge_es::Reshape(rowh, std::vector<int64_t>{ t->ne[2], t->ne[1], 1 });
         auto r32 = cannge_es::Cast(r3, (int64_t) f32);
-        auto one = ctx.builder.CreateConst(std::vector<float>(S, 1.0f), std::vector<int64_t>{ 1, 1, S });
+        auto one = ctx.const_cached(std::vector<float>(S, 1.0f), std::vector<int64_t>{ 1, 1, S });
         h        = cannge_es::Cast(
             cannge_es::Add(cannge_es::Mul(h32, cannge_es::Sub(one, m3)), cannge_es::Mul(r32, m3)), (int64_t) dt);
         return true;
@@ -170,7 +170,7 @@ static bool ggml_cannge_splice_fresh_row(ggml_cannge_build_context & ctx, ggml_t
         auto ri  = cannge_es::Slice(rowh, std::vector<int64_t>{ i, 0 }, std::vector<int64_t>{ 1, t->ne[1] * t->ne[2] });
         auto r3  = cannge_es::Reshape(ri, std::vector<int64_t>{ t->ne[2], t->ne[1], 1 });
         auto r32 = cannge_es::Cast(r3, (int64_t) f32);
-        auto one = ctx.builder.CreateConst(std::vector<float>(S, 1.0f), std::vector<int64_t>{ 1, 1, S });
+        auto one = ctx.const_cached(std::vector<float>(S, 1.0f), std::vector<int64_t>{ 1, 1, S });
         hacc     = cannge_es::Add(cannge_es::Mul(hacc, cannge_es::Sub(one, m3)), cannge_es::Mul(r32, m3));
     }
     h = cannge_es::Cast(hacc, (int64_t) dt);

@@ -23,6 +23,8 @@ Require successful compilation and linking of every CANNGE translation unit. The
 
 ## Correctness and support
 
+The reviewed collaborator merge preserves opt-in scatter: set `GGML_CANNGE_SCATTER=1` to enable it; `GGML_CANNGE_NO_SCATTER` overrides it. Disk caching is disabled unless `GGML_CANNGE_GE_CACHE_DIR` names a directory. `GGML_CANNGE_BMM_GEMV` remains opt-in. Validate each path separately before changing defaults. For disk caching, compare cold and warm runs in separate processes against CPU results.
+
 Enable `GGML_CANNGE_GRAPH=1`. Select the exact CANNGE device name reported by the backend as `backend_name`; the test's `-b` filter is an exact match.
 
 This revision's shared comparison helper ignores graph execution return codes. Build this directory's standalone test project on Linux, then set `LD_PRELOAD` to its `libcannge-status-guard.so` when running numerical tests. The guard exits with status 90 on a failed execution and prints the backend and graph nodes. A zero test exit without this guard is insufficient when stderr reports execution failures. The guard is for validation only; do not preload it for performance measurements.

@@ -185,10 +185,14 @@ static const char * ggml_cannge_matmul_rejection(const ggml_tensor * op, const g
 #else
     const size_t align_elems = 32 / ggml_type_size(weights->type);
 #endif
-    if (weights->ne[0] % align_elems != 0 || weights->ne[1] % align_elems != 0 || input->ne[1] % align_elems != 0) {
+    const int rank = ggml_n_dims(weights);
+    // rank-2 matmuls pad M up to the tiling multiple in the build (the pad
+    // axis is unambiguous there); higher ranks keep the hard alignment gate
+    const bool m_needs_pad = rank == 2 && input->ne[1] % align_elems != 0;
+    if (weights->ne[0] % align_elems != 0 || weights->ne[1] % align_elems != 0 ||
+        (input->ne[1] % align_elems != 0 && !m_needs_pad)) {
         return "batched matmul M/N/K dimensions do not meet GE alignment requirements";
     }
-    const int rank = ggml_n_dims(weights);
     if (rank != ggml_n_dims(input) || rank < 2 || rank > 4) {
         return "batched matmul requires matching ranks from two through four";
     }

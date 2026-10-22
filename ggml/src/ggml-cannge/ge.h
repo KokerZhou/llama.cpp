@@ -47,8 +47,10 @@ class ggml_cannge_ge_context {
     ggml_cannge_ge_context(const ggml_cannge_ge_context &)            = delete;
     ggml_cannge_ge_context & operator=(const ggml_cannge_ge_context &) = delete;
 
-    // graph is an opaque ge::Graph produced by the graph build step
-    bool add_and_compile(void * graph, uint32_t & graph_id, std::string & err);
+    // graph is an opaque ge::Graph produced by the graph build step; graph_key
+    // identifies the graph for the compile disk cache (ignored when empty)
+    bool add_and_compile(void * graph, uint32_t & graph_id, std::string & err,
+                         const std::string & graph_key = std::string());
     bool load(uint32_t graph_id, void * stream, std::string & err);
     // Success also includes graphs already removed by compile rollback.
     bool remove(uint32_t graph_id);

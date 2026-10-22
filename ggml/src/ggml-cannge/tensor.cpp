@@ -135,7 +135,8 @@ bool ggml_cannge_build_tensor(ggml_cannge_build_context & ctx, ggml_tensor * nod
                 }
                 gathered = cannge_es::Cast(gathered, (int64_t) dt);
             }
-            ctx.tensors[node] = gathered;
+            // Gather retains singleton index axes; consumers use ggml's trimmed rank.
+            ctx.tensors[node] = cannge_es::Reshape(gathered, ggml_cannge_ge_shape(node));
             return true;
         }
 
@@ -146,7 +147,7 @@ bool ggml_cannge_build_tensor(ggml_cannge_build_context & ctx, ggml_tensor * nod
             const int nd = ggml_n_dims(node);
             const int ge_axis = nd - 1 - (int) node->op_params[0];
             ctx.tensors[node] =
-                cannge_es::Concat(ctx.builder.CreateScalar((int32_t) ge_axis), { es0, es1 }, 2);
+                cannge_es::Concat(ctx.scalar_cached((int32_t) ge_axis), { es0, es1 }, 2);
             return true;
         }
 
@@ -231,7 +232,7 @@ bool ggml_cannge_build_tensor(ggml_cannge_build_context & ctx, ggml_tensor * nod
                     if (!ggml_cannge_ge_dtype(src0->type, dtype)) {
                         return ctx.fail("unsupported scatter materialization dtype");
                     }
-                    auto zero = ctx.builder.CreateConst(std::vector<float>{ 0.0f }, std::vector<int64_t>{ 1, 1 });
+                    auto zero = ctx.const_cached(std::vector<float>{ 0.0f }, std::vector<int64_t>{ 1, 1 });
                     if (src0->type != GGML_TYPE_F32) {
                         zero = cannge_es::Cast(zero, (int64_t) dtype);
                     }

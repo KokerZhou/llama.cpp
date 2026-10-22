@@ -59,7 +59,7 @@ bool ggml_cannge_build_rope(ggml_cannge_build_context & ctx, ggml_tensor * node)
             const std::vector<int64_t> shape_pos = { n_tok, 1 };
             const std::vector<int64_t> shape_fr  = { 1, half };
             auto pos_f = cannge_es::Reshape(cannge_es::Cast(es1, (int64_t) ge::DT_FLOAT), shape_pos);
-            auto theta = cannge_es::Mul(pos_f, ctx.builder.CreateConst(freqs, shape_fr)); // [n_tok, half] f32
+            auto theta = cannge_es::Mul(pos_f, ctx.const_cached(freqs, shape_fr)); // [n_tok, half] f32
             auto cos_t = cannge_es::Cos(theta); // include/es/es_math/es_Cos.h
             auto sin_t = cannge_es::Sin(theta); // include/es/es_math/es_Sin.h
 
@@ -72,15 +72,15 @@ bool ggml_cannge_build_rope(ggml_cannge_build_context & ctx, ggml_tensor * node)
             std::vector<cannge_es::EsTensorHolder> two_cos = { cos_t, cos_t };
             std::vector<cannge_es::EsTensorHolder> two_sin = { sin_t, sin_t };
             if (mode == GGML_ROPE_TYPE_NEOX) {
-                cos_tab = cannge_es::Concat(ctx.builder.CreateScalar((int32_t) 1), two_cos, 2);
-                sin_tab = cannge_es::Concat(ctx.builder.CreateScalar((int32_t) 1), two_sin, 2);
+                cos_tab = cannge_es::Concat(ctx.scalar_cached((int32_t) 1), two_cos, 2);
+                sin_tab = cannge_es::Concat(ctx.scalar_cached((int32_t) 1), two_sin, 2);
             } else {
                 auto dup_pairs = [&](cannge_es::EsTensorHolder t) {
                     const std::vector<int64_t>          shape3 = { n_tok, half, 1 };
                     const std::vector<int64_t>          shape2 = { n_tok, (int64_t) n_dims };
                     auto e = cannge_es::Reshape(t, shape3);
                     std::vector<cannge_es::EsTensorHolder> two = { e, e };
-                    e      = cannge_es::Concat(ctx.builder.CreateScalar((int32_t) 2), two, 2);
+                    e      = cannge_es::Concat(ctx.scalar_cached((int32_t) 2), two, 2);
                     return cannge_es::Reshape(e, shape2);
                 };
                 cos_tab = dup_pairs(cos_t);

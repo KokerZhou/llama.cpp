@@ -22,5 +22,6 @@ public:
     EsTensorHolder CreateInput(int64_t, const char *, DataType, Format, const std::vector<int64_t> &) { return make_holder(); }
     template<class T> EsTensorHolder CreateScalar(T) { return make_holder(); }
     template<class T> EsTensorHolder CreateConst(const std::vector<T> &, const std::vector<int64_t> &) { return make_holder(); }
+    template<class T> EsTensorHolder CreateVector(const std::vector<T> &) { return make_holder(); }
 };
 } }

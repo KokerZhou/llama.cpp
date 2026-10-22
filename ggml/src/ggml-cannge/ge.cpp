@@ -25,6 +25,7 @@
 #include "ggml-impl.h"
 
 #include <acl/acl.h>
+#include <filesystem>
 #include <map>
 #include <mutex>
 #include <set>
@@ -98,6 +99,8 @@ struct ggml_cannge_ge_context::impl {
     std::unique_ptr<ge::Session> session;
     uint32_t           next_graph_id = 1; // graph ids are user assigned, keep them unique
     std::set<uint32_t> graphs;            // added graph ids, for rollback and eviction
+    std::string        cache_dir;         // empty: graph compile cache disabled
+    std::map<uint32_t, std::string> graph_keys; // graph_id -> ge.graph_key for load
 };
 
 ggml_cannge_ge_context * ggml_cannge_ge_context::create(int32_t device, std::string & err) {
@@ -113,6 +116,23 @@ ggml_cannge_ge_context * ggml_cannge_ge_context::create(int32_t device, std::str
     std::map<ge::AscendString, ge::AscendString> options = {
         { "ge.session_device_id", std::to_string(device).c_str() },
     };
+    // Disk caching is opt-in until cross-run correctness is validated.
+    const char * cache_env = getenv("GGML_CANNGE_GE_CACHE_DIR");
+    std::string  cache_dir;
+    if (cache_env != nullptr) {
+        cache_dir = cache_env;
+    }
+    if (!cache_dir.empty()) {
+        std::error_code ec;
+        std::filesystem::create_directories(cache_dir, ec);
+        if (ec) {
+            GGML_LOG_WARN("%s: GE cache dir %s unusable (%s), compile cache off\n", __func__, cache_dir.c_str(),
+                          ec.message().c_str());
+        } else {
+            options["ge.graph_compiler_cache_dir"] = cache_dir.c_str();
+            ctx->pimpl->cache_dir = cache_dir;
+        }
+    }
     try {
         ctx->pimpl->session.reset(new ge::Session(options));
     } catch (const std::exception & e) {
@@ -132,7 +152,8 @@ ggml_cannge_ge_context::~ggml_cannge_ge_context() {
     }
 }
 
-bool ggml_cannge_ge_context::add_and_compile(void * graph, uint32_t & graph_id, std::string & err) {
+bool ggml_cannge_ge_context::add_and_compile(void * graph, uint32_t & graph_id, std::string & err,
+                                             const std::string & graph_key) {
     if (graph == nullptr) {
         err = "null graph";
         return false;
@@ -140,15 +161,21 @@ bool ggml_cannge_ge_context::add_and_compile(void * graph, uint32_t & graph_id, 
 
     graph_id = pimpl->next_graph_id++;
 
+    std::map<ge::AscendString, ge::AscendString> options;
+    if (!pimpl->cache_dir.empty() && !graph_key.empty()) {
+        options["ge.graph_key"] = graph_key.c_str();
+    }
+
     // AddGraphWithCopy keeps the session clear of the caller's ge::Graph, the
     // caller releases the IR once this returns (D6: AddGraph mutates the input)
-    ge::Status ret = pimpl->session->AddGraphWithCopy(graph_id, *(ge::Graph *) graph);
+    ge::Status ret = pimpl->session->AddGraphWithCopy(graph_id, *(ge::Graph *) graph, options);
     if (ret != ge::SUCCESS) {
         err = "AddGraphWithCopy failed: " + ge::GEGetErrorMsg();
         return false;
     }
 
     pimpl->graphs.insert(graph_id);
+    pimpl->graph_keys[graph_id] = graph_key;
     ret = pimpl->session->CompileGraph(graph_id);
     if (ret != ge::SUCCESS) {
         err = "CompileGraph failed: " + ge::GEGetErrorMsg();
@@ -162,6 +189,11 @@ bool ggml_cannge_ge_context::add_and_compile(void * graph, uint32_t & graph_id, 
 
 bool ggml_cannge_ge_context::load(uint32_t graph_id, void * stream, std::string & err) {
     std::map<ge::AscendString, ge::AscendString> options;
+    const auto key = pimpl->graph_keys.find(graph_id);
+    if (!pimpl->cache_dir.empty() && key != pimpl->graph_keys.end() && !key->second.empty()) {
+        // the runner reads user_graph_key at load to restore the cached execution order
+        options["ge.graph_key"] = key->second.c_str();
+    }
     ge::Status ret = pimpl->session->LoadGraph(graph_id, options, stream);
     if (ret != ge::SUCCESS) {
         err = "LoadGraph failed: " + ge::GEGetErrorMsg();
@@ -180,6 +212,7 @@ bool ggml_cannge_ge_context::remove(uint32_t graph_id) {
         return false;
     }
     pimpl->graphs.erase(graph_id);
+    pimpl->graph_keys.erase(graph_id);
     return true;
 }
 

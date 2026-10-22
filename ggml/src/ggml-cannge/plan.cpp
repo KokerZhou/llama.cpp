@@ -203,7 +203,10 @@ class ggml_cannge_plan_analysis {
 
         // Keep supported merged-cache updates in GE and expose the updated cache as an output.
         // Other layouts retain the host scatter and its row-data output port.
-        if (options.allow_noncontiguous_cont()) {
+        // The explicit output port is mandatory: the boundary-output walk below skips
+        // dense views of inputs ("bytes already present"), but the SET_ROWS node is a
+        // view of the cache whose fresh bytes exist only as the in-graph scatter result.
+        if (options.allow_noncontiguous_cont() || options.scatter) {
             for (int i = 0; i < n_nodes; i++) {
                 ggml_tensor * node = cgraph->nodes[i];
                 if (ggml_is_empty(node) || node->op != GGML_OP_SET_ROWS || node->src[2] == nullptr) {
@@ -214,6 +217,10 @@ class ggml_cannge_plan_analysis {
                     ggml_cannge_resolve_view(node->src[2], dinfo) && is_input.count(dinfo.base)) {
                     sr_in_graph[node] = true;
                     io.outputs.push_back(node);
+                } else if (sr_in_graph[node]) {
+                    // marked in index_graph without the input check: the scatter var
+                    // would read an unbound buffer, keep the host scatter instead
+                    sr_in_graph[node] = false;
                 }
             }
         }

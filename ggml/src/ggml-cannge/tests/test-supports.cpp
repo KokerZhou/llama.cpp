@@ -48,13 +48,29 @@ static void test_matmul_support() {
     expect("batched matmul requires matching types or F16 weights with F32 input");
     input.type = GGML_TYPE_F32; weights.type = GGML_TYPE_F16;
     expect(nullptr);
-    for (auto * dimension : {&weights.ne[0], &weights.ne[1], &input.ne[1]}) {
+    for (auto * dimension : {&weights.ne[0], &weights.ne[1]}) {
         const auto saved = *dimension;
         *dimension = 17;
         if (dimension == &weights.ne[0]) { input.ne[0] = 17; }
         expect("batched matmul M/N/K dimensions do not meet GE alignment requirements");
         *dimension = saved;
         input.ne[0] = weights.ne[0];
+    }
+    // rank-2 M off the tiling multiple is padded in the build, so it is supported
+    {
+        const auto saved = input.ne[1];
+        input.ne[1] = 17;
+        expect(nullptr);
+        input.ne[1] = saved;
+    }
+    // higher-rank M misalignment still has no GE path
+    weights.ne[3] = 2; input.ne[3] = 2;
+    {
+        const auto saved = input.ne[1];
+        input.ne[1] = 17;
+        expect("batched matmul M/N/K dimensions do not meet GE alignment requirements");
+        input.ne[1] = saved;
+        weights.ne[3] = 1; input.ne[3] = 1;
     }
     weights.ne[2] = 2;
     expect("batched matmul requires matching ranks from two through four");
