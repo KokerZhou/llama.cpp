@@ -44,6 +44,9 @@ public:
         cannge_test::graphs.insert(id);
         return SUCCESS;
     }
+    Status AddGraphWithCopy(uint32_t id, Graph & g, const std::map<AscendString, AscendString> &) {
+        return AddGraphWithCopy(id, g);
+    }
     Status CompileGraph(uint32_t) { return cannge_test::fail_compile ? 1 : SUCCESS; }
     Status RemoveGraph(uint32_t id) {
         cannge_test::remove_calls++;
