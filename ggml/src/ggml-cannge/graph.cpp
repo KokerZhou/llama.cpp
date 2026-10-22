@@ -238,7 +238,11 @@ static ggml_cannge_plan * ggml_cannge_prepare_plan(ggml_backend_cannge_context *
         }
 
         // the session owns an IR copy now, release the caller-side graph
-        const bool compiled = ctx->ge->add_and_compile(graph_owner.get(), fresh->graph_id, err);
+        // cache key: the plan signature covers op sequence, shapes, strides,
+        // port order and options, so its hash identifies the graph uniquely
+        char graph_key[32];
+        snprintf(graph_key, sizeof(graph_key), "cannge_%016zx", std::hash<std::string>{}(signature));
+        const bool compiled = ctx->ge->add_and_compile(graph_owner.get(), fresh->graph_id, err, graph_key);
         graph_owner.reset();
         if (!compiled) {
             GGML_LOG_ERROR("%s: compile failed: %s\n", __func__, err.c_str());
