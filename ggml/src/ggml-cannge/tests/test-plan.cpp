@@ -166,6 +166,18 @@ int main() {
         }
     }
 
+    scatter.tensors[1].ne[1] = 0;
+    scatter.tensors[3].ne[0] = 0;
+    for (bool enabled : {false, true}) {
+        options = {};
+        options.scatter = options.contiguous_views = enabled;
+        ggml_cannge_plan_io empty_scatter;
+        check(ggml_cannge_plan_analyze(&scatter.graph, empty_scatter, err, options), "empty update analysis");
+        check(empty_scatter.set_rows.empty(), "empty updates must not snapshot indices or scatter");
+        check(std::find(empty_scatter.output_tensors.begin(), empty_scatter.output_tensors.end(),
+                        &scatter.tensors[1]) == empty_scatter.output_tensors.end(), "empty producer needs no writeback");
+    }
+
     fixture views;
     auto & cache = views.tensors[0];
     cache.ne[1] = 4; cache.nb[2] = cache.nb[3] = 64;

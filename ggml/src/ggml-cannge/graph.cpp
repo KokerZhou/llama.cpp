@@ -664,6 +664,7 @@ enum ggml_status ggml_backend_cannge_graph_compute(ggml_backend_t backend, ggml_
 
     // static capability pre-check (L0 gate of the fallback ladder)
     const ggml_cannge_options options = ggml_cannge_options::from_env();
+    bool needs_compute = false;
     for (int i = 0; i < cgraph->n_nodes; i++) {
         ggml_tensor * node = cgraph->nodes[i];
         if (ggml_is_empty(node) || node->op == GGML_OP_NONE) {
@@ -680,6 +681,13 @@ enum ggml_status ggml_backend_cannge_graph_compute(ggml_backend_t backend, ggml_
             GGML_LOG_ERROR("%s: %s (%s) rejected: %s\n", __func__, node->name, ggml_op_name(node->op), reason);
             return GGML_STATUS_FAILED;
         }
+        if (node->op != GGML_OP_VIEW && node->op != GGML_OP_RESHAPE &&
+            node->op != GGML_OP_PERMUTE && node->op != GGML_OP_TRANSPOSE) {
+            needs_compute = true;
+        }
+    }
+    if (!needs_compute) {
+        return GGML_STATUS_SUCCESS;
     }
 
     std::string err;
