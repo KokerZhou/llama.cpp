@@ -102,3 +102,28 @@ adj_x2；f16 输入内部 f32 累加）。lm head 不再切 12 块（无 broadca
 - msprof：op_summary（设备时长/等待/算子）+ task_time_slice（忙闲时间线）+ api_statistic
   （host API）。用法见 scripts 或本 note 的历史命令。
 - 探针纪律继续有效：单算子单图先行（ggml_probe_gemv 本轮拦下并验证了 BMM 路径）。
+
+## 9. 续批：--ignore-eos 真稳态 + GE 运行时下发坐实（2026-10-22 晚）
+
+**口径修正**：Qwen3 对短 prompt 的回答 ~30 token 即 EOS，此前 -n 100/200/400 全被 EOS
+截断，测的是"首 token 恢复摊销"而非稳态。note-36 早有此教训（长跑必须 --ignore-eos）。
+-n 400 --ignore-eos 真稳态（ctx~400，t=4）：分裂 9.0 t/s（111ms/token）、合并+BMM 7.8 t/s
+（128ms/token）。
+
+**GE 运行时下发坐实**（gdb 全线程抽样，note-36 方法）：合并路径 decode 主线程热点 =
+`ge::DavinciModel::Run`——墙钟花在 GE 运行时逐 kernel 下发。op_summary 的 kernel 实际
+时长合计仅 ~15-22ms/token：**下发开销 ≈ 3-4× kernel 工作**。合并 decode 图 ~7300 op
+（BMM 后 249 BatchMatMulV3 替代了 gemv 分解，但 Reshape 反升至 2079）。
+
+**融合 RmsNorm 试探失败**：es::RmsNorm 单算子探针在 910B3 全过（72/72，含 310P 掉行的
+{128,32}/{128,8} 形状——310P bug 不在 910B），但模型级 GE 的融合 pass 把它和前序 Add
+自动改写成 InplaceAddRmsNorm，后者 tiling 要求 x1/x2 全同 dims，遇广播 Add 即编译失败。
+已回滚（无 submit）。教训：写融合算子要防 GE 二次改写；或自建 AddRmsNorm 控形状。
+
+**结构结论**：GE 图路径在本栈（910B + CANN 9.1.0）的收益上限受限于逐 kernel 下发；
+要到 CANN 的 71.7（13.9ms/token）需要**整图 kernel 数降到几百级**——那意味着融合注意力
+（修 note-42 的 PFA 末行语义 bug + IFA decode squeeze，或从 CANN 12.x 移
+FusedInferAttentionScore 的 ES 封装），不是继续削零碎 op 能到的。
+
+**复核基线**：原生 CANN（aclnn + aclrt 捕获）71.7 t/s 是本机同一 llama.cpp 框架实测
+（note-36），框架本身不是瓶颈——瓶颈在我们的 GE 核粒度。
