@@ -36,7 +36,9 @@ ggml_cannge_options ggml_cannge_options::from_env() {
     options.contiguous_views = std::getenv("GGML_CANNGE_CONT_NC") != nullptr;
     options.disable_contiguous_views = std::getenv("GGML_CANNGE_NO_CONT_NC") != nullptr;
     options.disable_splice = std::getenv("GGML_CANNGE_NO_SPLICE") != nullptr;
-    options.scatter = std::getenv("GGML_CANNGE_SCATTER") != nullptr;
+    // in-graph TSU scatter is the default since the writeback fix (note-55);
+    // GGML_CANNGE_NO_SCATTER forces the host scatter path back on
+    options.scatter = std::getenv("GGML_CANNGE_NO_SCATTER") == nullptr;
     options.scatter_add_zero = std::getenv("GGML_CANNGE_SR_ADD0") != nullptr;
     options.gemv_bmm = std::getenv("GGML_CANNGE_BMM_GEMV") != nullptr;
     options.attention_input_permute = std::getenv("GGML_CANNGE_FA_INPERM") != nullptr;
