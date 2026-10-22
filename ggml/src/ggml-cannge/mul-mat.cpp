@@ -114,7 +114,8 @@ bool ggml_cannge_build_matmul(ggml_cannge_build_context & ctx, ggml_tensor * nod
         if (ctx.io.options.gemv_bmm) {
             // M==1 via one BatchMatMulV3 (cube unit, f32 internal accumulate)
             // instead of the Mul+ReduceSum decomposition; no broadcast Mul, so
-            // the lm-head N chunking does not apply either
+            // the lm-head N chunking does not apply either. Operands must be
+            // 3D: the 2D form fails BatchMatMulV3 tiling on this toolkit
             ge::DataType f16d;
             if (!ggml_cannge_ge_dtype(GGML_TYPE_F16, f16d)) {
                 return ctx.fail("no GE f16 for bmm gemv");
