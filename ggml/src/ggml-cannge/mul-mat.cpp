@@ -315,7 +315,26 @@ bool ggml_cannge_build_matmul(ggml_cannge_build_context & ctx, ggml_tensor * nod
         es0 = cannge_es::Cast(es0, (int64_t) f32);
         es1 = cannge_es::Cast(es1, (int64_t) f32);
     }
+    // rank-2 M>1 with M off the GE tiling multiple: zero-pad M, slice back
+    const int64_t M_in  = src1->ne[1];
+    const int64_t M_pad = (M_in + 15) / 16 * 16;
+    if (M_pad != M_in) {
+        const enum ggml_type xtype = mixed ? GGML_TYPE_F32 : src1->type;
+        ge::DataType         xdt;
+        if (!ggml_cannge_ge_dtype(xtype, xdt)) {
+            return ctx.fail("no GE dtype for mul_mat pad");
+        }
+        auto zeros = ctx.const_cached(std::vector<float>((M_pad - M_in) * src0->ne[0], 0.0f),
+                                      { M_pad - M_in, src0->ne[0] });
+        if (xdt != ge::DT_FLOAT) {
+            zeros = cannge_es::Cast(zeros, (int64_t) xdt);
+        }
+        es1 = cannge_es::Concat(ctx.scalar_cached((int64_t) 0), { es1, zeros }, 2);
+    }
     auto mm = cannge_es::BatchMatMulV3(es1, es0, nullptr, nullptr, false, true);
+    if (M_pad != M_in) {
+        mm = cannge_es::Slice(mm, std::vector<int64_t>{ 0, 0 }, std::vector<int64_t>{ M_in, src0->ne[1] });
+    }
     if (node->type != (mixed ? GGML_TYPE_F32 : src0->type)) {
         ge::DataType dt;
         if (!ggml_cannge_ge_dtype(node->type, dt)) {
