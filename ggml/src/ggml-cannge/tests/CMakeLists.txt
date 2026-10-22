@@ -34,3 +34,14 @@ add_executable(test-cannge-build-lookup test-build-lookup.cpp metadata-stubs.cpp
 target_compile_features(test-cannge-build-lookup PRIVATE cxx_std_17)
 target_include_directories(test-cannge-build-lookup PRIVATE stubs .. ../.. ../../../include)
 add_test(NAME cannge-build-lookup COMMAND test-cannge-build-lookup)
+
+foreach(test view plan supports lifecycle cpy build-lookup)
+    target_sources(test-cannge-${test} PRIVATE abort-stubs.cpp)
+endforeach()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_library(cannge-status-guard SHARED strict-status.cpp)
+    target_compile_features(cannge-status-guard PRIVATE cxx_std_17)
+    target_include_directories(cannge-status-guard PRIVATE ../../../include)
+    target_link_libraries(cannge-status-guard PRIVATE ${CMAKE_DL_LIBS})
+endif()

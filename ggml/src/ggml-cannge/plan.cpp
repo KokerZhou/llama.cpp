@@ -283,7 +283,7 @@ class ggml_cannge_plan_analysis {
                 }
             }
             if (node->op == GGML_OP_SET_ROWS && node->src[0] != nullptr && node->src[1] != nullptr &&
-                node->src[2] != nullptr) {
+                node->src[2] != nullptr && !ggml_is_empty(node->src[0])) {
                 io.set_rows.push_back({ node->src[2], node->src[0], node->src[1], sr_in_graph[node] });
                 // the scatter runs post-execute and reads the data tensor's ggml
                 // buffer. When the data is produced inside this graph (e.g. rope

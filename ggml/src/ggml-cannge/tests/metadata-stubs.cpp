@@ -11,6 +11,7 @@ int ggml_n_dims(const ggml_tensor * t) {
     return 1;
 }
 size_t ggml_nbytes(const ggml_tensor * t) {
+    if (ggml_is_empty(t)) { return 0; }
     size_t bytes = ggml_element_size(t);
     for (int d = 0; d < GGML_MAX_DIMS; d++) { bytes += (t->ne[d] - 1) * t->nb[d]; }
     return bytes;

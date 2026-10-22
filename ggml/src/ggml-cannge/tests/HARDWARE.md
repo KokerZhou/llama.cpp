@@ -1,6 +1,6 @@
 # CANNGE hardware validation
 
-Status: not run for the refactoring series. SDK-free tests are not substitutes for these checks.
+Status: partial 910B3 validation on CANN 9.1.0; see [910B3 results](910B3-RESULTS.md). SDK-free tests are not substitutes for these checks.
 The [official API contract audit](API-AUDIT.md) records documentation evidence and unresolved assumptions separately from runtime validation.
 Run on an Ascend host with its matching driver and CANN SDK. Do not download SDK images or build on the local Windows workstation. Preserve branch `cannge` and use separate build directories or source archives for comparisons; do not rewrite history or switch branches.
 
@@ -24,6 +24,8 @@ Require successful compilation and linking of every CANNGE translation unit. The
 ## Correctness and support
 
 Enable `GGML_CANNGE_GRAPH=1`. Select the exact CANNGE device name reported by the backend as `backend_name`; the test's `-b` filter is an exact match.
+
+This revision's shared comparison helper ignores graph execution return codes. Build this directory's standalone test project on Linux, then set `LD_PRELOAD` to its `libcannge-status-guard.so` when running numerical tests. The guard exits with status 90 on a failed execution and prints the backend and graph nodes. A zero test exit without this guard is insufficient when stderr reports execution failures. The guard is for validation only; do not preload it for performance measurements.
 
 ```sh
 export GGML_CANNGE_GRAPH=1

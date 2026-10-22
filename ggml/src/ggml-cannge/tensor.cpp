@@ -220,7 +220,7 @@ bool ggml_cannge_build_tensor(ggml_cannge_build_context & ctx, ggml_tensor * nod
             // different buffer than the in-graph consumers (writeback diverges
             // while in-graph values stay correct; note-52 batch N). Add a
             // broadcast zero to force a private materialization for the port.
-            if (src0 != nullptr && ctx.io.options.scatter_add_zero) {
+            if (src0 != nullptr && !ggml_is_empty(src0) && ctx.io.options.scatter_add_zero) {
                 cannge_es::EsTensorHolder datah;
                 const auto lookup = ctx.try_get(src0, datah);
                 if (lookup == ggml_cannge_build_result::failure) {
