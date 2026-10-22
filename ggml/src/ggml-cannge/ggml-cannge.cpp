@@ -294,7 +294,12 @@ static bool ggml_backend_cannge_cpy_tensor_async(ggml_backend_t backend_src, ggm
 static void ggml_backend_cannge_synchronize(ggml_backend_t backend) {
     ggml_backend_cannge_context * ctx = (ggml_backend_cannge_context *) backend->context;
     ggml_backend_cannge_set_device(ctx->device);
+    const double t0 = g_dbg_time.on ? g_dbg_time.now() : 0;
     ggml_cannge_check(aclrtSynchronizeStream(ctx->stream), "aclrtSynchronizeStream", __func__);
+    if (g_dbg_time.on) {
+        g_dbg_time.sync_calls++;
+        g_dbg_time.sync_ms += g_dbg_time.now() - t0;
+    }
 }
 
 // L0 gate of the fallback ladder: the whole-graph path is opt-in via env,

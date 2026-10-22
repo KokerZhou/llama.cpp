@@ -27,6 +27,8 @@ struct ggml_cannge_dbg_timing {
     double    stage_bytes = 0;
     std::map<std::string, double> stage_names;
     long long calls = 0, cpy_calls = 0, evicts = 0;
+    long long sync_calls = 0;
+    double    sync_ms = 0;
     static double now() {
         return std::chrono::duration<double, std::milli>(
                    std::chrono::steady_clock::now().time_since_epoch()).count();
