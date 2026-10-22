@@ -127,3 +127,54 @@ FusedInferAttentionScore 的 ES 封装），不是继续削零碎 op 能到的�
 
 **复核基线**：原生 CANN（aclnn + aclrt 捕获）71.7 t/s 是本机同一 llama.cpp 框架实测
 （note-36），框架本身不是瓶颈——瓶颈在我们的 GE 核粒度。
+
+## 10. 续批 2：IFA 平台坑定界 + M-pad + note-36 口径基准（2026-10-22 深夜）
+
+### IFA（decode 融合注意力）平台坑——探针定界
+
+ggml_probe_fa mode 12（IFA decode，s_q=1，mask 前 N 可见）参数化扫描：
+
+| KV 窗口 | keep | 结果 |
+|---|---|---|
+| 8 | 3 | PASS 2.4e-04 |
+| 8 | 10（全可见） | PASS |
+| 9/12/15/16/17/32/256 | 3 | **FAIL max_rel~1.0，~96% bad** |
+| 16 | 16（全可见） | **FAIL 0.18** |
+| 256 | 256（全可见） | **FAIL 0.04** |
+
+- asl 正确到达（DEBUG_IO 实测 asl=3 n_kv=16），**与 mask/asl 无关**——全可见也错。
+- 结论：本 toolkit（CANN 9.1.0 910B）的 GE IncreFlashAttention 在 kv 窗口 >8 时算错，
+  疑似平台算子缺陷/约束（opp 里只有数个预编译变体）。**不是封装 bug**。
+- 模型的 q 是 f32（探针是 f16）曾误判为嫌疑——加 q→f16 cast 后模型级仍乱码，已回滚
+  （FA 路径默认关，不留未证实的改动）。
+- FA 大面积收益（每层注意力 ~50 op → 1 op）被此平台坑卡住。JI 用的
+  FusedInferAttentionScore 的 ES 封装在本 toolkit 不存在（仅 aclnn 有）。
+
+### M-pad（99d75ba03）
+
+rank-2 M>1 且 M%16≠0 的 matmul 之前直接落 CPU 碎图。现在后端内补零到 16 倍数再走
+BatchMatMulV3、结果切回。探针 ggml_probe_mpad：m17-ffn / m2-srv 上 GE 且数值过
+（5.6e-05 / 2.5e-06）；rank-3 仍按设计拒绝。**注意**：note-36 基准的 ~480 token prompt
+M=480 本就 16 对齐，此改动对长 prompt 无感——它救的是短/奇数 prompt。
+
+### note-36 口径基准（--ignore-eos -n 64，~480 token prompt，t=4，热缓存）
+
+| 配置 | Prompt t/s | Generation t/s |
+|---|---|---|
+| CANN graph（原生基线） | 7373.7 | **72.3** |
+| CANNGE 分裂（GQA） | 4.7 | 6.3 |
+| CANNGE 合并（+CONT_NC+BMM） | 1.8 | **18.0** |
+
+- 合并路径是**当前 decode 最优**（长上下文下分裂路径的 CPU 岛随窗口变大而更贵）。
+- 会话起点 9.4 → 现 18.0（约 2x）；对 CANN 72.3 还差 4x，卡点在 GE 逐 kernel 下发
+  （§9）+ prefill 碎图（M>1 的 rank-3 attention/rope/softmax 仍未覆盖）。
+- prefill 1.8 t/s：长 prompt 的 rank-3 attention 与 rope/softmax 落 CPU + 同步风暴，
+  与 decode 的 v_cont 岛同构。要救需 PFA（也被 IFA 同族平台问题威胁，note-42 末行 bug）。
+
+### 诚实的路线评估
+
+GE 图路径在 910B+CANN9.1.0 的天花板 ≈ 20 t/s 量级（逐 kernel 下发 ~15µs/op ×
+每 token 数千 op）。要继续逼近 72，必须让每层注意力收敛到单算子（IFA/PFA），
+而当前 toolkit 的 GE 版 IFA 在 kv>8 即错——**这是平台侧硬约束**。
+可选：a) 深挖 GE IFA 的宽 cache 参数（block_table/paged 语义）；b) 修 PFA 末行 bug
+（note-42，prefill 用）；c) 接受 aclnn 原生后端为生产路径，CANNGE 作研究验证。
