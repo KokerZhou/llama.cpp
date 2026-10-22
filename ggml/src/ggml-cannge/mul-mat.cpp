@@ -48,6 +48,19 @@
 
 namespace cannge_es = ge::es;
 
+// emit the cast only when it changes dtype; GE did not fold the f16->f16
+// casts we used to emit per gemv (note-52 batch-noise), and each surviving
+// cast is a real kernel on the merged graph
+static cannge_es::EsTensorHolder cast_if_needed(cannge_es::EsTensorHolder h, enum ggml_type src_type,
+                                                ge::DataType dst) {
+    ge::DataType sdt;
+    if (!ggml_cannge_ge_dtype(src_type, sdt) || sdt == dst) {
+        return h;
+    }
+    return cannge_es::Cast(h, (int64_t) dst);
+}
+
+
 #include "graph-build-priv.h"
 
 
@@ -134,7 +147,7 @@ bool ggml_cannge_build_matmul(ggml_cannge_build_context & ctx, ggml_tensor * nod
             ctx.tensors[node] = out;
             return true;
         }
-        auto prod = cannge_es::Mul(cannge_es::Cast(es0, (int64_t) f32), cannge_es::Cast(es1, (int64_t) f32));
+        auto prod = cannge_es::Mul(cast_if_needed(es0, src0->type, f32), cast_if_needed(es1, src1->type, f32));
         auto sum  = cannge_es::ReduceSum(prod, ctx.builder.CreateVector(axes), false);
         if (f16prod || node->type != GGML_TYPE_F32) {
             // ggml mul_mat output is always F32 (ggml.c); the f16
@@ -186,7 +199,7 @@ bool ggml_cannge_build_matmul(ggml_cannge_build_context & ctx, ggml_tensor * nod
         }
         // K sits at the last GE axis in both layouts
         std::vector<int64_t> axes = { src0->ne[2] != src1->ne[2] ? 3 : (int64_t) ggml_n_dims(src0) - 1 };
-        auto prod = cannge_es::Mul(cannge_es::Cast(e0, (int64_t) f32), cannge_es::Cast(e1, (int64_t) f32));
+        auto prod = cannge_es::Mul(cast_if_needed(e0, src0->type, f32), cast_if_needed(e1, src1->type, f32));
         auto sum  = cannge_es::ReduceSum(prod, ctx.builder.CreateVector(axes), false);
         // fresh-row splice (note-50 batch K): the K view chain reads
         // the cache pre-scatter; when the fragment produces Kcur, add
@@ -222,7 +235,7 @@ bool ggml_cannge_build_matmul(ggml_cannge_build_context & ctx, ggml_tensor * nod
                     // kq_cur[g,r,1] = sum_k Kcur[k,g] * q[k,r,g]:
                     // Kcur {K,G} -> {G,1,1,K}; e1 is {G,R,1,K}
                     auto kr       = cannge_es::Reshape(rowh, std::vector<int64_t>{ G, 1, 1, K });
-                    auto cur_prod = cannge_es::Mul(cannge_es::Cast(kr, (int64_t) f32), cannge_es::Cast(e1, (int64_t) f32));
+                    auto cur_prod = cannge_es::Mul(cast_if_needed(kr, src0->type == GGML_TYPE_F16 ? GGML_TYPE_F32 : src0->type, f32), cast_if_needed(e1, src1->type, f32));
                     auto cur_sum  = cannge_es::ReduceSum(cur_prod, ctx.builder.CreateVector(std::vector<int64_t>{ 3 }), false);
                     // {G,R,1} -> {G,R,1(,1)}; select into {G,R,N(,1)}
                     cannge_es::EsTensorHolder m;
