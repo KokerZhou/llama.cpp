@@ -16,6 +16,7 @@
 #include <cstring>
 #include <map>
 #include <string>
+#include <typeinfo>
 #include <vector>
 
 namespace cannge_es = ge::es;
@@ -54,6 +55,47 @@ struct ggml_cannge_build_context {
     bool fail(const std::string & msg) {
         err = msg;
         return false;
+    }
+
+    // dedup constants: per-node builders re-emit identical axes/scalars/tables;
+    // keep one Const op per distinct value in the compiled graph
+    std::map<std::string, cannge_es::EsTensorHolder> consts;
+
+    template <typename T>
+    cannge_es::EsTensorHolder const_cached(const std::vector<T> & value, const std::vector<int64_t> & dims) {
+        std::string key = "c";
+        key += typeid(T).name();
+        key.append(reinterpret_cast<const char *>(dims.data()), dims.size() * sizeof(int64_t));
+        key.append(reinterpret_cast<const char *>(value.data()), value.size() * sizeof(T));
+        auto [it, inserted] = consts.try_emplace(std::move(key));
+        if (inserted) {
+            it->second = builder.CreateConst(value, dims);
+        }
+        return it->second;
+    }
+
+    template <typename T>
+    cannge_es::EsTensorHolder scalar_cached(T value) {
+        std::string key = "s";
+        key += typeid(T).name();
+        key.append(reinterpret_cast<const char *>(&value), sizeof(value));
+        auto [it, inserted] = consts.try_emplace(std::move(key));
+        if (inserted) {
+            it->second = builder.CreateScalar(value);
+        }
+        return it->second;
+    }
+
+    template <typename T>
+    cannge_es::EsTensorHolder vector_cached(const std::vector<T> & value) {
+        std::string key = "v";
+        key += typeid(T).name();
+        key.append(reinterpret_cast<const char *>(value.data()), value.size() * sizeof(T));
+        auto [it, inserted] = consts.try_emplace(std::move(key));
+        if (inserted) {
+            it->second = builder.CreateVector(value);
+        }
+        return it->second;
     }
 
     // Optional lookup preserves errors for absent tensors, but reports reconstruction failures.

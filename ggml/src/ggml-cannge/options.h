@@ -21,6 +21,7 @@ struct ggml_cannge_options {
     bool disable_splice = false;
     bool scatter = false;
     bool scatter_add_zero = false;
+    bool gemv_bmm = false;
     bool attention_input_permute = false;
     bool attention_output_permute = false;
     bool attention_ifa_all = false;

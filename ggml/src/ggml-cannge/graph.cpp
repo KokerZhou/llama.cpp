@@ -197,9 +197,10 @@ static ggml_cannge_plan * ggml_cannge_prepare_plan(ggml_backend_cannge_context *
             if (g_dbg_time.on) g_dbg_time.evicts++;
         }
         if (getenv("GGML_CANNGE_DEBUG_COMPILE")) {
-            fprintf(stderr, "[DBG-COMPILE] start nodes=%d first=%s(%s) last=%s(%s) sig=%zu\n", cgraph->n_nodes,
+            fprintf(stderr, "[DBG-COMPILE] start nodes=%d first=%s(%s) last=%s(%s) sig=%zu t=%.1f\n", cgraph->n_nodes,
                     cgraph->nodes[0]->name, ggml_op_name(cgraph->nodes[0]->op), cgraph->nodes[cgraph->n_nodes - 1]->name,
-                    ggml_op_name(cgraph->nodes[cgraph->n_nodes - 1]->op), std::hash<std::string>{}(signature));
+                    ggml_op_name(cgraph->nodes[cgraph->n_nodes - 1]->op), std::hash<std::string>{}(signature),
+                    g_dbg_time.now() / 1000.0);
         }
         // build and compile first so a build failure is not cached; a
         // compile/load failure caches a FAILED plan below
@@ -239,9 +240,12 @@ static ggml_cannge_plan * ggml_cannge_prepare_plan(ggml_backend_cannge_context *
 
         // the session owns an IR copy now, release the caller-side graph
         // cache key: the plan signature covers op sequence, shapes, strides,
-        // port order and options, so its hash identifies the graph uniquely
-        char graph_key[32];
-        snprintf(graph_key, sizeof(graph_key), "cannge_%016zx", std::hash<std::string>{}(signature));
+        // port order and options; the emit version covers the ES lowering
+        // (bump GGML_CANNGE_EMIT_VERSION when the build emits different ops
+        // for the same ggml graph, else a stale disk entry is restored)
+        char graph_key[48];
+        snprintf(graph_key, sizeof(graph_key), "cannge_v%d_%016zx", GGML_CANNGE_EMIT_VERSION,
+                 std::hash<std::string>{}(signature));
         const bool compiled = ctx->ge->add_and_compile(graph_owner.get(), fresh->graph_id, err, graph_key);
         graph_owner.reset();
         if (!compiled) {
@@ -249,7 +253,7 @@ static ggml_cannge_plan * ggml_cannge_prepare_plan(ggml_backend_cannge_context *
             fresh->state = ggml_cannge_plan::FAILED;
         } else {
             if (getenv("GGML_CANNGE_DEBUG_COMPILE")) {
-                fprintf(stderr, "[DBG-COMPILE] done nodes=%d\n", cgraph->n_nodes);
+                fprintf(stderr, "[DBG-COMPILE] done nodes=%d t=%.1f\n", cgraph->n_nodes, g_dbg_time.now() / 1000.0);
             }
             fresh->state = ggml_cannge_plan::COMPILED;
         }

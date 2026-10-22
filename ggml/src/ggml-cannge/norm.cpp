@@ -50,7 +50,7 @@ bool ggml_cannge_build_norm(ggml_cannge_build_context & ctx, ggml_tensor * node)
             }
             // ggml: softmax(x*scale + mask) over the innermost dim
             // (ggml-cpu ops.cpp ggml_compute_forward_soft_max_f32)
-            auto es = scale == 1.0f ? es0 : cannge_es::Mul(es0, ctx.builder.CreateScalar(scale));
+            auto es = scale == 1.0f ? es0 : cannge_es::Mul(es0, ctx.scalar_cached(scale));
             if (src1 != nullptr) {
                 if (!ctx.get(src1, es1)) {
                     return false;
@@ -83,8 +83,8 @@ bool ggml_cannge_build_norm(ggml_cannge_build_context & ctx, ggml_tensor * node)
             // include/es/es_ReduceMean.h
             const int nd = ggml_n_dims(src0);
             std::vector<int64_t> axes = { (int64_t) nd - 1 }; // GE: last axis
-            auto ms = cannge_es::ReduceMean(cannge_es::Square(es0), ctx.builder.CreateVector(axes), true);
-            auto den = cannge_es::Rsqrt(cannge_es::Add(ms, ctx.builder.CreateScalar(eps)));
+            auto ms = cannge_es::ReduceMean(cannge_es::Square(es0), ctx.vector_cached(axes), true);
+            auto den = cannge_es::Rsqrt(cannge_es::Add(ms, ctx.scalar_cached(eps)));
             if (getenv("GGML_CANNGE_DEBUG_BUILD")) {
                 fprintf(stderr, "[DBG-RMS] %s ne=%lld,%lld,%lld,%lld\n", node->name, (long long) src0->ne[0],
                         (long long) src0->ne[1], (long long) src0->ne[2], (long long) src0->ne[3]);
@@ -107,8 +107,8 @@ bool ggml_cannge_build_norm(ggml_cannge_build_context & ctx, ggml_tensor * node)
             const int64_t      n = src0->ne[0];
             std::vector<float> ones(n, 1.0f);
             std::vector<float> zeros(n, 0.0f);
-            auto gamma = ctx.builder.CreateConst(ones, { n });
-            auto beta  = ctx.builder.CreateConst(zeros, { n });
+            auto gamma = ctx.const_cached(ones, { n });
+            auto beta  = ctx.const_cached(zeros, { n });
             auto ln = cannge_es::LayerNorm(es0, gamma, beta, (int64_t) ggml_n_dims(src0) - 1,
                                            (int64_t) ggml_n_dims(src0) - 1, eps); // include/es/es_nn/es_LayerNorm.h
             ctx.tensors[node] = ln.y;

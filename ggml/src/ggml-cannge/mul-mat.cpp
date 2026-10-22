@@ -111,6 +111,26 @@ bool ggml_cannge_build_matmul(ggml_cannge_build_context & ctx, ggml_tensor * nod
                     (long long) src0->ne[3], (long long) src1->ne[0], (long long) src1->ne[1],
                     (long long) src1->ne[2], (long long) src1->ne[3]);
         }
+        if (ctx.io.options.gemv_bmm) {
+            // M==1 via one BatchMatMulV3 (cube unit, f32 internal accumulate)
+            // instead of the Mul+ReduceSum decomposition; no broadcast Mul, so
+            // the lm-head N chunking does not apply either
+            ge::DataType f16d;
+            if (!ggml_cannge_ge_dtype(GGML_TYPE_F16, f16d)) {
+                return ctx.fail("no GE f16 for bmm gemv");
+            }
+            const int64_t K = src0->ne[0], N = src0->ne[1];
+            auto x1 = cannge_es::Reshape(cast_if_needed(es1, src1->type, f16d), ctx.vector_cached(std::vector<int64_t>{ 1, 1, K }));
+            auto x2 = cannge_es::Reshape(cast_if_needed(es0, src0->type, f16d), ctx.vector_cached(std::vector<int64_t>{ 1, N, K }));
+            auto y  = cannge_es::BatchMatMulV3(x1, x2, nullptr, nullptr, false, true);
+            auto out = cannge_es::Reshape(y, ggml_cannge_ge_shape(node));
+            ge::DataType dt;
+            if (!ggml_cannge_ge_dtype(node->type, dt)) {
+                return ctx.fail("no GE output dtype for bmm gemv");
+            }
+            ctx.tensors[node] = cannge_es::Cast(out, (int64_t) dt);
+            return true;
+        }
         auto do_gemv = [&](cannge_es::EsTensorHolder w, int64_t n_off, int64_t n_len,
                            cannge_es::EsTensorHolder x) -> cannge_es::EsTensorHolder {
             std::vector<int64_t> off = { n_off, 0 };
@@ -123,7 +143,7 @@ bool ggml_cannge_build_matmul(ggml_cannge_build_context & ctx, ggml_tensor * nod
                 ctx.fail("no GE f32 for chunked gemv");
             }
             auto prod = cannge_es::Mul(cannge_es::Cast(wc, (int64_t) pf32), cannge_es::Cast(x, (int64_t) pf32));
-            auto sum  = cannge_es::ReduceSum(prod, ctx.builder.CreateVector(axes), false);
+            auto sum  = cannge_es::ReduceSum(prod, ctx.vector_cached(axes), false);
             ge::DataType dt;
             if (!ggml_cannge_ge_dtype(GGML_TYPE_F32, dt)) {
                 ctx.fail("no GE f32 for chunked gemv");
@@ -141,14 +161,14 @@ bool ggml_cannge_build_matmul(ggml_cannge_build_context & ctx, ggml_tensor * nod
                 parts.push_back(do_gemv(es0, off, std::min(chunk, n - off), es1));
             }
             auto out = parts.size() == 1 ? parts[0]
-                                         : cannge_es::Concat(ctx.builder.CreateScalar((int64_t) 0), parts,
+                                         : cannge_es::Concat(ctx.scalar_cached((int64_t) 0), parts,
                                                              (int) parts.size());
             out      = cannge_es::Reshape(out, ggml_cannge_ge_shape(node));
             ctx.tensors[node] = out;
             return true;
         }
         auto prod = cannge_es::Mul(cast_if_needed(es0, src0->type, f32), cast_if_needed(es1, src1->type, f32));
-        auto sum  = cannge_es::ReduceSum(prod, ctx.builder.CreateVector(axes), false);
+        auto sum  = cannge_es::ReduceSum(prod, ctx.vector_cached(axes), false);
         if (f16prod || node->type != GGML_TYPE_F32) {
             // ggml mul_mat output is always F32 (ggml.c); the f16
             // product path must still present f32 to the writeback
@@ -200,7 +220,7 @@ bool ggml_cannge_build_matmul(ggml_cannge_build_context & ctx, ggml_tensor * nod
         // K sits at the last GE axis in both layouts
         std::vector<int64_t> axes = { src0->ne[2] != src1->ne[2] ? 3 : (int64_t) ggml_n_dims(src0) - 1 };
         auto prod = cannge_es::Mul(cast_if_needed(e0, src0->type, f32), cast_if_needed(e1, src1->type, f32));
-        auto sum  = cannge_es::ReduceSum(prod, ctx.builder.CreateVector(axes), false);
+        auto sum  = cannge_es::ReduceSum(prod, ctx.vector_cached(axes), false);
         // fresh-row splice (note-50 batch K): the K view chain reads
         // the cache pre-scatter; when the fragment produces Kcur, add
         // the current slot's scores (one tiny gemv) at the slot index
@@ -236,7 +256,7 @@ bool ggml_cannge_build_matmul(ggml_cannge_build_context & ctx, ggml_tensor * nod
                     // Kcur {K,G} -> {G,1,1,K}; e1 is {G,R,1,K}
                     auto kr       = cannge_es::Reshape(rowh, std::vector<int64_t>{ G, 1, 1, K });
                     auto cur_prod = cannge_es::Mul(cast_if_needed(kr, src0->type == GGML_TYPE_F16 ? GGML_TYPE_F32 : src0->type, f32), cast_if_needed(e1, src1->type, f32));
-                    auto cur_sum  = cannge_es::ReduceSum(cur_prod, ctx.builder.CreateVector(std::vector<int64_t>{ 3 }), false);
+                    auto cur_sum  = cannge_es::ReduceSum(cur_prod, ctx.vector_cached(std::vector<int64_t>{ 3 }), false);
                     // {G,R,1} -> {G,R,1(,1)}; select into {G,R,N(,1)}
                     cannge_es::EsTensorHolder m;
                     if (!ggml_cannge_onehot_slot(ctx, idxh, N, m, sr->idx)) {
@@ -247,7 +267,7 @@ bool ggml_cannge_build_matmul(ggml_cannge_build_context & ctx, ggml_tensor * nod
                     if (!ggml_cannge_ge_dtype(GGML_TYPE_F32, f32d)) {
                         return ctx.fail("no GE f32 for kq splice");
                     }
-                    auto one = ctx.builder.CreateConst(std::vector<float>(N, 1.0f), std::vector<int64_t>{ 1, 1, N });
+                    auto one = ctx.const_cached(std::vector<float>(N, 1.0f), std::vector<int64_t>{ 1, 1, N });
                     auto s32 = cannge_es::Cast(sum, (int64_t) f32d);
                     auto c32 = cannge_es::Cast(cur_sum, (int64_t) f32d);
                     sum      = cannge_es::Add(cannge_es::Mul(s32, cannge_es::Sub(one, m3)), cannge_es::Mul(c32, m3));

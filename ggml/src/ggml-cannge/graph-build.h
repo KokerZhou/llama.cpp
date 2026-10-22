@@ -34,6 +34,10 @@ struct ggml_cannge_plan;
 struct ggml_cannge_plan_io;
 struct ggml_cgraph;
 
+// bump when the ES lowering of the same ggml graph changes; the value is part
+// of the GE compile-cache key, so a stale disk entry is never restored
+#define GGML_CANNGE_EMIT_VERSION 2
+
 // ggml -> GE dtype mapping, F32/I32 names follow the ge::DataType enum
 static inline bool ggml_cannge_ge_dtype(enum ggml_type type, ge::DataType & dt) {
     switch (type) {
