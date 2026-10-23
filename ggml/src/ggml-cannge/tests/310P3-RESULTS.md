@@ -47,3 +47,34 @@ The validation guard was extended after these runs to catch `aclrtSynchronizeStr
 Relevant logs: `device.stderr`, `matmul-repro.log`, `matmul-f16.log`, `matmul-aligned.log`, and `matmul-rank3.log`. The original model process also produced `/root/ascend/log/debug/plog/plog-33892_20261023114550933.log`.
 
 Resolve the reduced failure and shutdown behavior before model comparisons, optional-path validation, or paired blocking-copy benchmarks. Do not treat successful small-matrix tests as evidence that the large projection is supported safely.
+
+## Direct GE isolation, 2026-10-24
+
+The reusable 310 connection was re-established. The same SDK, source snapshot, and idle 310P3 devices were used. Disabling the backend's `ge.tiling_schedule_optimize` option did not resolve the projection failure. The experimental configuration patch was reverted.
+
+`ge-matmul-probe.cpp` removes ggml entirely. It creates an ES graph containing two F16 inputs, BatchMatMulV3 with the right operand transposed, and an F32 output cast. It uses host `ge::Tensor` inputs with `Session::RunGraph`; there is no ggml planning, device-buffer binding, M padding, compile-cache key, or zero-copy reuse option. Both inputs contain ones, so every output must equal the contraction dimension K.
+
+| Probe | Result |
+| --- | --- |
+| M=16, N=16, K=256 | All 256 outputs equal 256; removal and GE finalization succeed |
+| M=16, N=4096, K=2560 | GE execution fails with the same MTE on-chip write-out-of-bounds error |
+| Same large shape using MatMulV3 | Compilation/inference fails because MatMulV3 has no registered `infer_datatype` function in this installation |
+
+The large BatchMatMulV3 probe reports the same kernel name as the backend's aligned-M failure: `te_batchmatmulv3_df42adbf9b253c82a5cbd6ddd09bee38ca5d73b4104b030e803c7c9af463ae1d__kernel0`. This isolates a failing GE/operator execution path independently of ggml. It does not distinguish a kernel implementation defect from a driver, runtime, or installation incompatibility. Do not disable GE inference validation to bypass the MatMulV3 error.
+
+Reproduce with the installed CANN 9.1.0 headers and libraries (ABI setting matches this installation):
+
+```sh
+source /usr/local/Ascend/ascend-toolkit/set_env.sh
+sdk=/usr/local/Ascend/ascend-toolkit/latest
+g++ -std=c++17 -D_GLIBCXX_USE_CXX11_ABI=0 \
+  "$source_dir/ggml/src/ggml-cannge/tests/ge-matmul-probe.cpp" \
+  -I "$sdk/include" -I "$sdk/include/es" -I "$sdk/include/ge" \
+  -L "$sdk/lib64" -lascendcl -lge_runner -lgraph -lgraph_base \
+  -les_math -les_nn -leager_style_graph_builder_base -lc_sec -o ge-matmul-probe
+timeout -k 10 90 ./ge-matmul-probe bmm small
+timeout -k 10 90 ./ge-matmul-probe
+timeout -k 10 90 ./ge-matmul-probe matmul
+```
+
+The probe prints the failing phase and GE error, then exits 90 without cleanup on GE failure. It is a diagnostic reproducer, not production recovery code or a benchmark. Logs are `ge-probe-small.log`, `ge-probe-bmm-final.log`, `ge-probe-matmul.log`, and `no-tiling-repro.log` in the validation directory.

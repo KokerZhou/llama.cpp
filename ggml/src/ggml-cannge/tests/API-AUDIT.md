@@ -22,3 +22,9 @@ Reviewed 2026-10-18 against source at dc6d218, with the device-selection comment
 - Debug output reads in `graph.cpp` still ignore some copy errors and a synchronization result. Diagnostic output after those failures cannot be trusted. This audit does not mark that path corrected.
 - This review does not establish ES builder signature compatibility, numerical correctness, all host-buffer asynchronous-copy constraints, or correctness with custom ACL contexts.
 - Blocking-copy latency and throughput require paired device measurements. Documentation provides no performance result for this implementation. Follow [HARDWARE.md](HARDWARE.md); no local SDK downloads or hardware-free SDK builds are needed for this audit.
+
+## Tiling and matmul follow-up, 2026-10-24
+
+The local official GE clone at `3f1fd9f7ea4208e3e88255d0c5c55fed8097d845` documents `ge.tiling_schedule_optimize` as disabled by default in `docs/en/design/features/tiling_sink.md`; its feature table lists A2/A3 products. `api/atc/atc_flags.cc` also defines the default as `0`. This source revision is separate from the installed CANN 9.1.0 binaries, so the table alone does not prove installed-runtime behavior. The backend currently enables the option unconditionally. Disabling it experimentally on 310P3 did not fix the large-matmul failure; no claim that it causes that failure is justified.
+
+The installed ES headers expose both BatchMatMulV3 and MatMulV3. Their presence does not establish executable operator support: the direct GE MatMulV3 probe failed on a missing registered datatype-inference function. The BatchMatMulV3 probe compiled but failed at execution for the large projection, while a small control passed. See [310P3 results](310P3-RESULTS.md) for the independent reproducer, exact shapes, and limits of these conclusions.
