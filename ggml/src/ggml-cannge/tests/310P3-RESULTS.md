@@ -78,3 +78,9 @@ timeout -k 10 90 ./ge-matmul-probe matmul
 ```
 
 The probe prints the failing phase and GE error, then exits 90 without cleanup on GE failure. It is a diagnostic reproducer, not production recovery code or a benchmark. Logs are `ge-probe-small.log`, `ge-probe-bmm-final.log`, `ge-probe-matmul.log`, and `no-tiling-repro.log` in the validation directory.
+
+### Format investigation
+
+On 2026-10-24 the unchanged large probe was run with `DUMP_GE_GRAPH=2`, `DUMP_GRAPH_LEVEL=3`, and `DUMP_GRAPH_PATH` pointing to a separate validation artifact directory, under the same 90-second timeout. It again exited 90. This installation emitted a task-trace JSON, not a graph with tensor descriptors. The trace lists TransData (task 2), the same failing BatchMatMulV3 kernel (task 3), and Cast (task 4), each with eight blocks. Thus a conversion kernel is present; the trace alone does not prove its source/destination format or correctness.
+
+Artifacts: `ge-probe-format-dump.log` and `ge-probe-format-dump/debug_graph_1_1792772498_18752_1.json` in the remote validation directory. Local copies are in `cannge-validation-310-49e9873`, with the JSON named `ge-probe-final-graph.json` (despite that filename, its content is a task trace). No probe process remained after this run. See [API-AUDIT.md](API-AUDIT.md) for the version-pinned operator source findings and remaining metadata gap.
