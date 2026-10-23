@@ -52,3 +52,15 @@ LD_PRELOAD="$metadata_build/libcannge-status-guard.so" \
 Full operator coverage, opt-in attention/GQA/scatter modes, merged model graphs, repeated decode/cache reuse, runtime recovery and paired blocking-copy performance measurements remain outstanding. No performance claim follows from these correctness checks.
 
 An existing model is available for subsequent validation: `/home/developer/models/Qwen3-4B-Instruct-2507-F16.gguf`, 8,051,285,344 bytes, SHA-256 `336228a2810f17724ecd6e9e2e40e8381eee81e886316fee311ade2899c31030`. Model inference has not yet been validated in this run.
+
+## Isolated revision check, 2026-10-23
+
+Revision `49e9873fb10001ea7c073b6f0a0ffaea0dc06a4e` was exported to `/mnt/workspace/cannge-validation-49e9873/source` and built separately from the shared checkout. The real SDK build of `test-backend-ops` and `llama-bench` completed successfully. Standalone regressions passed 6/6. Disk caching was disabled; only `GGML_CANNGE_GRAPH=1` was enabled for the default-path checks.
+
+While the tools were building, the previous test driver was run against the new revision's libraries, with resolution recorded in `test-library-paths.txt`. The driver used the new strict-status guard. CPY/CONT/SET_ROWS passed 132/132 supported cases. MUL_MAT passed 40/40 supported cases selected by `m=16,n=.,k=256,`, including small-M padding. These are library-validation results, not a claim that the newly built driver was used for those runs.
+
+The Qwen3-4B model check used a harness compiled against the isolated build, a fresh CPU reference, and strict status checking on the device run. It processed the prompt `The capital of France is` followed by the fixed continuation ` Paris. The capital of Japan is Tokyo.` one token at a time. It repeated the sequence after clearing the KV cache, producing ten logits vectors in each of two rounds.
+
+All logits were finite, all 20 top-token selections matched CPU, and the two device rounds were identical. However, eight of ten steps in each round exceeded the predetermined normalized mean squared error limit of `1e-5`. Prompt NMSE was `7.3049e-6`, worst decode NMSE was `3.5859e-5`, and maximum absolute logits error was `0.1076384`. The model check therefore failed; matching sampled tokens does not override the numerical criterion. Logs and comparison data are in `device.stderr` and `model-comparison.json` under the isolated validation directory.
+
+An earlier GEMV32 experiment also exceeded the limit, but its build came from the previously shared checkout and is diagnostic evidence only. The isolated no-matmul experiment lost its SSH session before a result was collected. Work moved to the owner's 310P3 environment because the 910 lab became busy. No blocking-copy performance claim follows from this run.
