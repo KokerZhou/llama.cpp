@@ -1,0 +1,65 @@
+{
+  "upstream": "https://github.com/Jittor/JittorInfer",
+  "base_commit": "55d1c1e1c2603ce9d15b6a4066ed17cd6bf3aa4d",
+  "archive_commit": "ebb45947f4ba228c8045ca24bf5e574b8bcaa00c",
+  "archive_sha256": "46f1acb1919ecebbe0512c363c8b61b04eadf718e0a171c6745d6100de12590e",
+  "upstream_archive_sha256": "ab8e287bb0bcb27997f1b5421b0615c17166b0b3f031ac651f0883b088e81b67",
+  "later_fixes_recovered_from_session": [
+    "837a28c: Threads::Threads",
+    "3688267: batched GET_ROWS weights"
+  ],
+  "recovery_limit": "Combined source delta; original later Git commit identities are not reconstructed.",
+  "patch_sha256": "5779583b06ac0a56409dfc96ed1d6bd9312f37b46831da149368b806100d881b",
+  "files": [
+    {
+      "path": "ggml/src/ggml-cann/CMakeLists.txt",
+      "before_blob": "13313068089b6acae9d69c50fa034bdb6edbc554",
+      "after_blob": "4c3975f1603db3b425981b49bc1c0a3d769fa55d"
+    },
+    {
+      "path": "ggml/src/ggml-cann/aclnn_ops.cpp",
+      "before_blob": "1f8643a6263419668e9991083b10b106e96ed3de",
+      "after_blob": "ba39b0b68af6095740cac0d05cb33eb950fce044"
+    },
+    {
+      "path": "ggml/src/ggml-cann/ascend_graph_ops.cpp",
+      "before_blob": "f5003fab0ae51792c5bd6bbc1b67a21cb9c61e89",
+      "after_blob": "56271410e0c5c45ceef79db366f143d49a3e457b"
+    },
+    {
+      "path": "ggml/src/ggml-cann/rope_cache.cpp",
+      "before_blob": "32e04e8e900f8e3b0f3c0234d9d4ea5f59e0c263",
+      "after_blob": "1d1a0ed95d8ae1d4497f5b9a822abe567e7c1688"
+    },
+    {
+      "path": "src/llama-graph-builder.cpp",
+      "before_blob": "19b2ed503aa0ad987e9c1b3610d62ff462e4b0b5",
+      "after_blob": "8ac5f7e2ecb21d76c41ed4c0ade4108a8515753f"
+    },
+    {
+      "path": "tests/ops/CMakeLists.txt",
+      "before_blob": "4c28924dd64e02b1f0ff85020dca65ce0c9bf771",
+      "after_blob": "1f3aa5a1dd8768a84cf0078812fceba2aae66ac9"
+    },
+    {
+      "path": "tests/ops/ops_test.cpp",
+      "before_blob": "f2a031b52df4bb783e92ec3612dc1bf5c1c41a9c",
+      "after_blob": "559a89671b41b5d6f597bdb3e49d86a78ec70d0a"
+    },
+    {
+      "path": "tests/ops/ops_test_case.cpp",
+      "before_blob": "3544171bd41f2a04fed34e56fc0b041df66f165c",
+      "after_blob": "75d2de431cf7d3bc6ffc42c6c8148f5aa85ec86f"
+    },
+    {
+      "path": "tests/ops/ops_test_case.h",
+      "before_blob": "6e162af7f03bc18657b893d4070448443c6a88ba",
+      "after_blob": "175dad954c1f613c73ce4cd1451b28af6f66387a"
+    }
+  ],
+  "validation": {
+    "git_apply_check": "passed",
+    "applied_file_blobs": "all matched after CRLF normalization",
+    "sdk_or_device_tests": "not run"
+  }
+}

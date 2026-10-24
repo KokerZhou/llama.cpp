@@ -1,0 +1,323 @@
+diff --git a/ggml/src/ggml-cann/CMakeLists.txt b/ggml/src/ggml-cann/CMakeLists.txt
+index 13313068089b6acae9d69c50fa034bdb6edbc554..4c3975f1603db3b425981b49bc1c0a3d769fa55d 100644
+--- a/ggml/src/ggml-cann/CMakeLists.txt
++++ b/ggml/src/ggml-cann/CMakeLists.txt
+@@ -1,3 +1,5 @@
++option(GGML_CANN_CUSTOM_ROPE "Build/install the custom DeepSeek GE RoPE package" ON)
++
+ if ("cann${CANN_INSTALL_DIR}" STREQUAL "cann" AND DEFINED ENV{ASCEND_TOOLKIT_HOME})
+     set(CANN_INSTALL_DIR $ENV{ASCEND_TOOLKIT_HOME})
+     message(STATUS "CANN: updated CANN_INSTALL_DIR from ASCEND_TOOLKIT_HOME=$ENV{ASCEND_TOOLKIT_HOME}")
+@@ -120,13 +122,16 @@
+     message(STATUS "CANN: CANN_INCLUDE_DIRS =  ${CANN_INCLUDE_DIRS}")
+     message(STATUS "CANN: CANN_LIBRARIES =  ${CANN_LIBRARIES}")
+ 
+-    add_custom_target(custom_rope_ext 
+-        COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/kernels/custom_rope_ext/op_project/install.sh
+-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/kernels/custom_rope_ext/op_project
+-        COMMENT "Running custom_rope_ext build script..."
+-    )
++    if(GGML_CANN_CUSTOM_ROPE)
++        target_compile_definitions(ggml-cann PRIVATE GGML_CANN_CUSTOM_ROPE)
++        add_custom_target(custom_rope_ext
++            COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/kernels/custom_rope_ext/op_project/install.sh
++            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/kernels/custom_rope_ext/op_project
++            COMMENT "Running custom_rope_ext build script..."
++        )
+ 
+-    add_dependencies(ggml-cann custom_rope_ext)
++        add_dependencies(ggml-cann custom_rope_ext)
++    endif()
+ else()
+     message(FATAL_ERROR "CANN: Can't find CANN_INSTALL_DIR, did you forget to source set_var.sh?")
+ endif()
+diff --git a/ggml/src/ggml-cann/aclnn_ops.cpp b/ggml/src/ggml-cann/aclnn_ops.cpp
+index 1f8643a6263419668e9991083b10b106e96ed3de..ba39b0b68af6095740cac0d05cb33eb950fce044 100644
+--- a/ggml/src/ggml-cann/aclnn_ops.cpp
++++ b/ggml/src/ggml-cann/aclnn_ops.cpp
+@@ -55,7 +55,6 @@
+ #include <aclnnop/aclnn_triu.h>
+ #include <aclnnop/aclnn_upsample_nearest_2d.h>
+ #include <aclnnop/aclnn_weight_quant_batch_matmul_v2.h>
+-#include <arm_neon.h>
+ #include <float.h>
+ 
+ #include <chrono>
+@@ -5807,18 +5806,18 @@
+ }
+ 
+ void convert_vector_fp32_to_fp16(const std::vector<float>& src,
+-                                 std::vector<float16_t>& dst) {
++                                 std::vector<ggml_fp16_t>& dst) {
+     dst.resize(src.size());
+     for (uint64_t i = 0; i < src.size(); i++) {
+-        dst[i] = float16_t(src[i]);
+-    }
+-}
+-
+-void convert_vector_fp16_to_fp32(const std::vector<float16_t>& src,
++        dst[i] = ggml_fp32_to_fp16(src[i]);
++    }
++}
++
++void convert_vector_fp16_to_fp32(const std::vector<ggml_fp16_t>& src,
+                                  std::vector<float>& dst) {
+     dst.resize(src.size());
+     for (uint64_t i = 0; i < src.size(); i++) {
+-        dst[i] = float(src[i]);
++        dst[i] = ggml_fp16_to_fp32(src[i]);
+     }
+ }
+ 
+@@ -5827,7 +5826,7 @@
+     const std::vector<float>& value_host, const std::vector<int8_t>& attn_mask,
+     std::vector<float>& output_host, int64_t batch_size, int64_t num_heads,
+     int64_t head_dim_kq, int64_t head_dim_v, int64_t key_num_heads,
+-    int64_t sequence_lenth_q, int64_t sequence_lenth_kv, float32_t scaleValue) {
++    int64_t sequence_lenth_q, int64_t sequence_lenth_kv, float scaleValue) {
+     // 修正：使用 key_num_heads 以匹配 GQA 的 KV 头数
+     int64_t numKeyValueHeads = key_num_heads;
+     std::string sLayerOut = "BSND";
+@@ -5838,10 +5837,10 @@
+     int64_t sparseMode = 1;    // 拦截，非量化情况不考虑
+     int64_t innerPrecise = 2;  // 高精度模式，开启行无效修正。
+ 
+-    std::vector<float16_t> query_host_fp16;
+-    std::vector<float16_t> key_host_fp16;
+-    std::vector<float16_t> value_host_fp16;
+-    std::vector<float16_t> output_host_fp16;
++    std::vector<ggml_fp16_t> query_host_fp16;
++    std::vector<ggml_fp16_t> key_host_fp16;
++    std::vector<ggml_fp16_t> value_host_fp16;
++    std::vector<ggml_fp16_t> output_host_fp16;
+ 
+     convert_vector_fp32_to_fp16(query_host, query_host_fp16);
+     convert_vector_fp32_to_fp16(key_host, key_host_fp16);
+@@ -5962,8 +5961,8 @@
+     ACL_CHECK(aclrtSynchronizeStream(stream));
+ 
+     auto size = GetShapeSize(outputShape);
+-    ret = aclrtMemcpy(output_host_fp16.data(), size * sizeof(float16_t),
+-                      outDeviceAddr, size * sizeof(float16_t),
++    ret = aclrtMemcpy(output_host_fp16.data(), size * sizeof(ggml_fp16_t),
++                      outDeviceAddr, size * sizeof(ggml_fp16_t),
+                       ACL_MEMCPY_DEVICE_TO_HOST);
+     CHECK_RET(
+         ret == ACL_SUCCESS,
+diff --git a/ggml/src/ggml-cann/ascend_graph_ops.cpp b/ggml/src/ggml-cann/ascend_graph_ops.cpp
+index f5003fab0ae51792c5bd6bbc1b67a21cb9c61e89..56271410e0c5c45ceef79db366f143d49a3e457b 100644
+--- a/ggml/src/ggml-cann/ascend_graph_ops.cpp
++++ b/ggml/src/ggml-cann/ascend_graph_ops.cpp
+@@ -12,7 +12,9 @@
+ #include "ascend_graph_ops.h"
+ #include "ascend_graph_ops_create.h"
+ #include "ggml-impl.h"
++#ifdef GGML_CANN_CUSTOM_ROPE
+ #include "op_proto.h"
++#endif
+ #include "rope_cache.h"
+ 
+ /**
+@@ -1836,6 +1838,7 @@
+     ge::Graph &graph, struct ggml_tensor *node,
+     std::map<struct ggml_tensor *, ge::Operator> &gmml_tensor_to_ge_op_map,
+     int op_index, ggml_backend_cann_context &cann_ctx) {
++#ifdef GGML_CANN_CUSTOM_ROPE
+     // 获取源张量
+     struct ggml_tensor *src0 = node->src[0];  // 输入张量
+     struct ggml_tensor *src1 = node->src[1];  // 位置索引张量
+@@ -2085,6 +2088,14 @@
+ 
+     // 返回最终操作
+     return op_reshape_dst;
++#else
++    GGML_UNUSED(graph);
++    GGML_UNUSED(node);
++    GGML_UNUSED(gmml_tensor_to_ge_op_map);
++    GGML_UNUSED(op_index);
++    GGML_UNUSED(cann_ctx);
++    GGML_ABORT("DeepSeek GE RoPE requires GGML_CANN_CUSTOM_ROPE; use eager execution (enable_ge=false).");
++#endif
+ }
+ 
+ /**
+diff --git a/ggml/src/ggml-cann/rope_cache.cpp b/ggml/src/ggml-cann/rope_cache.cpp
+index 32e04e8e900f8e3b0f3c0234d9d4ea5f59e0c263..1d1a0ed95d8ae1d4497f5b9a822abe567e7c1688 100644
+--- a/ggml/src/ggml-cann/rope_cache.cpp
++++ b/ggml/src/ggml-cann/rope_cache.cpp
+@@ -10,7 +10,6 @@
+ 
+ #include "all_ops.h"
+ #include "kernels/ascendc_kernels.h"
+-#include "op_proto.h"
+ 
+ static const int64_t MAX_KERNELS = 4096;
+ 
+diff --git a/src/llama-graph-builder.cpp b/src/llama-graph-builder.cpp
+index 19b2ed503aa0ad987e9c1b3610d62ff462e4b0b5..8ac5f7e2ecb21d76c41ed4c0ade4108a8515753f 100644
+--- a/src/llama-graph-builder.cpp
++++ b/src/llama-graph-builder.cpp
+@@ -117,6 +117,8 @@
+             return llm_build_deepseek2(lctx, buf_compute_meta, ubatch, cb, worst_case, print_layer);
+         case LLM_ARCH_QWEN2:
+             return llm_build_qwen2(lctx, buf_compute_meta, ubatch, cb, worst_case, print_layer);
++        case LLM_ARCH_QWEN3:
++            return llm_build_qwen3(lctx, buf_compute_meta, ubatch, cb, worst_case, print_layer);
+         default:
+             GGML_ABORT("Unsupported model architecture");
+     }
+diff --git a/tests/ops/CMakeLists.txt b/tests/ops/CMakeLists.txt
+index 4c28924dd64e02b1f0ff85020dca65ce0c9bf771..1f3aa5a1dd8768a84cf0078812fceba2aae66ac9 100644
+--- a/tests/ops/CMakeLists.txt
++++ b/tests/ops/CMakeLists.txt
+@@ -1,10 +1,12 @@
++find_package(Threads REQUIRED)
++
+ set(TARGET llama-test-flash-attn)
+ add_executable(${TARGET} 
+     flash_attn_aclnn.cpp
+     flash_attn_cpu.cpp
+ )
+ install(TARGETS ${TARGET} RUNTIME)
+-target_link_libraries(${TARGET} PRIVATE llama ${CMAKE_THREAD_LIBS_INIT})
++target_link_libraries(${TARGET} PRIVATE llama Threads::Threads)
+ target_include_directories(${TARGET} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+ target_compile_features(${TARGET} PRIVATE cxx_std_17)
+ 
+@@ -14,7 +16,7 @@
+     ops_test.cpp
+ )
+ install(TARGETS ${TARGET} RUNTIME)
+-target_link_libraries(${TARGET} PRIVATE llama ${CMAKE_THREAD_LIBS_INIT})
++target_link_libraries(${TARGET} PRIVATE llama Threads::Threads)
+ target_include_directories(${TARGET} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+ target_compile_features(${TARGET} PRIVATE cxx_std_17)
+ 
+@@ -23,6 +25,6 @@
+     test_ops_speed.cpp
+ )
+ install(TARGETS ${TARGET} RUNTIME)
+-target_link_libraries(${TARGET} PRIVATE llama ${CMAKE_THREAD_LIBS_INIT})
++target_link_libraries(${TARGET} PRIVATE llama Threads::Threads)
+ target_include_directories(${TARGET} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+ target_compile_features(${TARGET} PRIVATE cxx_std_17)
+diff --git a/tests/ops/ops_test.cpp b/tests/ops/ops_test.cpp
+index f2a031b52df4bb783e92ec3612dc1bf5c1c41a9c..559a89671b41b5d6f597bdb3e49d86a78ec70d0a 100644
+--- a/tests/ops/ops_test.cpp
++++ b/tests/ops/ops_test.cpp
+@@ -203,7 +203,7 @@
+     return accepted;
+ }
+ 
+-int main() {
++int main(int argc, char** argv) {
+     std::cout<<"Finding Decive:"<<std::endl;
+     int num_devices = ggml_backend_dev_count();
+ 
+@@ -257,6 +257,8 @@
+         new test_case_clamp(),
+         new test_case_cpy(),
+         new test_case_cont(),
++        new test_case_get_rows(),
++        new test_case_get_rows(true),
+         new test_case_diag_mask_inf(),
+         new test_case_soft_max(),
+         new test_case_soft_max({64,64,1,1},{5,5},true), // with mask
+@@ -274,8 +276,17 @@
+         new test_case_flash_attn_jittor(),
+         new test_case_flash_attn_prompt()
+     };
+-    std::vector<std::string> failed_operation; 
++    std::vector<std::string> failed_operation;
++    size_t selected_operations = 0;
+     for (int i = 0; i < test_cases.size(); ++i){
++        bool selected = argc == 1;
++        for (int arg = 1; arg < argc; ++arg) {
++            selected = selected || test_cases[i]->name == argv[arg];
++        }
++        if (!selected) {
++            continue;
++        }
++        ++selected_operations;
+         std::cout<<"testing case [" << i <<"]: operation :["<<test_cases[i]-> name<<"]" << std::endl;
+         bool res = ops_test(cann_dev, test_cases[i]);
+         if (res){
+@@ -285,9 +296,13 @@
+             failed_operation.push_back(test_cases[i]->name);
+         }
+     }
+-    std::cout << "Test result : " << failed_operation.size() << " / " << test_cases.size() << " failed :" << std::endl;
++    std::cout << "Test result : " << failed_operation.size() << " / " << selected_operations << " failed :" << std::endl;
+     for(auto &val : failed_operation){
+         std::cout << val << std::endl;
+     }
+-    return 0;
+-}
++    if (selected_operations == 0) {
++        std::cerr << "No operation matched the requested test names." << std::endl;
++        return 2;
++    }
++    return failed_operation.empty() ? 0 : 1;
++}
+diff --git a/tests/ops/ops_test_case.cpp b/tests/ops/ops_test_case.cpp
+index 3544171bd41f2a04fed34e56fc0b041df66f165c..75d2de431cf7d3bc6ffc42c6c8148f5aa85ec86f 100644
+--- a/tests/ops/ops_test_case.cpp
++++ b/tests/ops/ops_test_case.cpp
+@@ -404,6 +404,28 @@
+     ggml_tensor* tanspose = ggml_transpose(compute_ctx, src_tensors[0]); // test with transpose tensor
+     return ggml_cont(compute_ctx, tanspose);
+ }
++void test_case_get_rows::init_src_size() {
++    assert(src.empty());
++    src.push_back(ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 37, 11, 2));
++    src.push_back(ggml_new_tensor_2d(ctx, GGML_TYPE_I32, 5, 2));
++    output_size = 37 * 5 * 2;
++}
++void test_case_get_rows::init_tensors() {
++    init_tensor(src[0]);
++    auto* indices = static_cast<int32_t*>(src[1]->data);
++    for (int64_t i = 0; i < ggml_nelements(src[1]); ++i) {
++        indices[i] = static_cast<int32_t>((i * 7 + 3) % src[0]->ne[1]);
++    }
++}
++ggml_tensor* test_case_get_rows::build_graph(
++    ggml_context* compute_ctx,
++    std::vector<ggml_tensor*>& src_tensors) const {
++    ggml_tensor* weights = src_tensors[0];
++    if (use_f16) {
++        weights = ggml_cast(compute_ctx, weights, GGML_TYPE_F16);
++    }
++    return ggml_get_rows(compute_ctx, weights, src_tensors[1]);
++}
+ void test_case_diag_mask_inf::init_src_size(){
+     assert(src.empty());
+     src.push_back(ggml_new_tensor_4d(ctx, GGML_TYPE_F32, ne[0], ne[1], ne[2], ne[3]));
+@@ -842,4 +864,4 @@
+             init_tensor(val);
+         }
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/tests/ops/ops_test_case.h b/tests/ops/ops_test_case.h
+index 6e162af7f03bc18657b893d4070448443c6a88ba..175dad954c1f613c73ce4cd1451b28af6f66387a 100644
+--- a/tests/ops/ops_test_case.h
++++ b/tests/ops/ops_test_case.h
+@@ -277,6 +277,17 @@
+     void init_src_size();
+     ggml_tensor* build_graph(ggml_context* compute_ctx, std::vector<ggml_tensor*>& src_tensors)const;
+ };
++struct test_case_get_rows : test_case {
++    bool use_f16;
++    explicit test_case_get_rows(bool use_f16 = false)
++        : test_case(use_f16 ? "GET_ROWS_F16" : "GET_ROWS_F32"),
++          use_f16(use_f16) {}
++    void init_src_size();
++    void init_tensors() override;
++    ggml_tensor* build_graph(
++        ggml_context* compute_ctx,
++        std::vector<ggml_tensor*>& src_tensors) const;
++};
+ struct test_case_diag_mask_inf:test_case{
+     std::vector<int> ne;
+     int n_past;

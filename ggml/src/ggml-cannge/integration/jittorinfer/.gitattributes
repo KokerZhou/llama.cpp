@@ -1,0 +1,2 @@
+# Preserve upstream context and removed lines in retained patches.
+*.patch -whitespace
