@@ -22,6 +22,7 @@
 
 #include "graph.h"
 #include "cpy.h"
+#include "debug.h"
 #include "supports.h"
 #include "ggml-cannge-impl.h"
 #include "ggml-cannge.h"
@@ -505,138 +506,6 @@ static ggml_status ggml_cannge_bind_outputs(ggml_backend_cannge_context * ctx, g
     return GGML_STATUS_SUCCESS;
 }
 
-static void ggml_cannge_debug_inputs(const ggml_cannge_plan_io & io) {
-    if (getenv("GGML_CANNGE_DEBUG_IO")) {
-        // checksum helper: cheap fletcher-32 over up to 4 KB read back from
-        // the pointer's own side (device ptr -> D2H, host ptr -> direct)
-        auto dbg_sum = [](const char * tag, ggml_tensor * t, bool dev) {
-            const size_t n = std::min((size_t) ggml_nbytes(t), (size_t) 4096);
-            std::vector<char> buf(n);
-            if (dev) {
-                aclrtMemcpy(buf.data(), n, t->data, n, ACL_MEMCPY_DEVICE_TO_HOST);
-            } else {
-                memcpy(buf.data(), t->data, n);
-            }
-            uint32_t a = 0, b = 0;
-            for (size_t i = 0; i < n; i++) {
-                a = (a + (uint8_t) buf[i]) % 65535;
-                b = (b + a) % 65535;
-            }
-            fprintf(stderr, "[DBG-IO] %s %s ne=%lld,%lld,%lld,%lld sum=%08x", tag, t->name,
-                    (long long) t->ne[0], (long long) t->ne[1], (long long) t->ne[2], (long long) t->ne[3],
-                    (b << 16) | a);
-            // chunk fletchers at 4 KB granularity across the whole span:
-            // localizes strided/partial corruption to a head/token range
-            {
-                const size_t total = ggml_nbytes(t);
-                const size_t csize = 4096;
-                for (size_t c = csize; c + csize <= total && c <= 8 * csize; c += csize) {
-                    std::vector<char> cb(csize);
-                    if (dev) {
-                        aclrtMemcpy(cb.data(), csize, (const char *) t->data + c, csize, ACL_MEMCPY_DEVICE_TO_HOST);
-                    } else {
-                        memcpy(cb.data(), (const char *) t->data + c, csize);
-                    }
-                    uint32_t ca = 0, cb2 = 0;
-                    for (size_t j = 0; j < csize; j++) {
-                        ca = (ca + (uint8_t) cb[j]) % 65535;
-                        cb2 = (cb2 + ca) % 65535;
-                    }
-                    fprintf(stderr, " +%zuk=%08x", c / 1024, (cb2 << 16) | ca);
-                }
-            }
-            // element 0,1,127 (head 0) and 128,129,255 (head 1): the head
-            // boundary at index 128 catches partial writes per head
-            const int idxs[6] = { 0, 1, 127, 128, 129, 255 };
-            for (int e = 0; e < 6; e++) {
-                const size_t off = (size_t) idxs[e] * (t->type == GGML_TYPE_F16 ? 2 : 4);
-                if (off + (t->type == GGML_TYPE_F16 ? 2 : 4) > n) break;
-                float v;
-                if (t->type == GGML_TYPE_F16) {
-                    uint16_t u;
-                    memcpy(&u, buf.data() + off, 2);
-                    v = ggml_fp16_to_fp32(u);
-                } else {
-                    memcpy(&v, buf.data() + off, 4);
-                }
-                fprintf(stderr, " i%d=%.4g", idxs[e], v);
-            }
-            fprintf(stderr, "\n");
-        };
-        for (size_t i = 0; i < io.inputs.size(); i++) {
-            const bool dev = !(io.inputs[i]->buffer && ggml_backend_buffer_is_host(io.inputs[i]->buffer));
-            dbg_sum("in ", io.inputs[i], dev);
-        }
-    }
-}
-
-static void ggml_cannge_debug_outputs(ggml_backend_cannge_context * ctx, const ggml_cannge_plan_io & io) {
-    if (getenv("GGML_CANNGE_DEBUG_IO")) {
-        ggml_cannge_check(aclrtSynchronizeStream(ctx->stream), "aclrtSynchronizeStream", __func__);
-        for (size_t i = 0; i < io.output_tensors.size(); i++) {
-            const bool dev = !(io.output_tensors[i]->buffer && ggml_backend_buffer_is_host(io.output_tensors[i]->buffer));
-            const size_t n = std::min((size_t) ggml_nbytes(io.output_tensors[i]), (size_t) 4096);
-            std::vector<char> buf(n);
-            if (dev) {
-                aclrtMemcpy(buf.data(), n, io.output_tensors[i]->data, n, ACL_MEMCPY_DEVICE_TO_HOST);
-            } else {
-                memcpy(buf.data(), io.output_tensors[i]->data, n);
-            }
-            uint32_t a = 0, b = 0;
-            for (size_t j = 0; j < n; j++) {
-                a = (a + (uint8_t) buf[j]) % 65535;
-                b = (b + a) % 65535;
-            }
-            fprintf(stderr, "[DBG-IO] out %s%s ne=%lld,%lld,%lld,%lld nb=%lld,%lld,%lld,%lld sum=%08x",
-                    ggml_is_contiguous(io.output_tensors[i]) ? "D " : "S ",
-                    io.output_tensors[i]->name,
-                    (long long) io.output_tensors[i]->ne[0], (long long) io.output_tensors[i]->ne[1],
-                    (long long) io.output_tensors[i]->ne[2], (long long) io.output_tensors[i]->ne[3],
-                    (long long) io.output_tensors[i]->nb[0], (long long) io.output_tensors[i]->nb[1],
-                    (long long) io.output_tensors[i]->nb[2], (long long) io.output_tensors[i]->nb[3], (b << 16) | a);
-            // chunked fletchers localize corruption to a head/token range
-            {
-                const size_t total = ggml_nbytes(io.output_tensors[i]);
-                const size_t csize = 4096;
-                for (size_t c = csize; c + csize <= total && c <= 8 * csize; c += csize) {
-                    std::vector<char> cb(csize);
-                    if (dev) {
-                        aclrtMemcpy(cb.data(), csize, (const char *) io.output_tensors[i]->data + c, csize,
-                                    ACL_MEMCPY_DEVICE_TO_HOST);
-                    } else {
-                        memcpy(cb.data(), (const char *) io.output_tensors[i]->data + c, csize);
-                    }
-                    uint32_t ca = 0, cb2 = 0;
-                    for (size_t j = 0; j < csize; j++) {
-                        ca = (ca + (uint8_t) cb[j]) % 65535;
-                        cb2 = (cb2 + ca) % 65535;
-                    }
-                    fprintf(stderr, " +%zuk=%08x", c / 1024, (cb2 << 16) | ca);
-                }
-            }
-            // sample indices 0,1,2,127,128,255 to catch per-head partial writes
-            const ggml_tensor * ot = io.output_tensors[i];
-            const int idxs[6] = { 0, 1, 2, 127, 128, 255 };
-            for (int e = 0; e < 6; e++) {
-                const size_t off = (size_t) idxs[e] * (ot->type == GGML_TYPE_F16 ? 2 : 4);
-                if (off + (ot->type == GGML_TYPE_F16 ? 2 : 4) > n) break;
-                float v;
-                if (ot->type == GGML_TYPE_F16) {
-                    uint16_t u;
-                    memcpy(&u, buf.data() + off, 2);
-                    v = ggml_fp16_to_fp32(u);
-                } else if (ot->type == GGML_TYPE_F32) {
-                    memcpy(&v, buf.data() + off, 4);
-                } else {
-                    break;
-                }
-                fprintf(stderr, " i%d=%.4g", idxs[e], v);
-            }
-            fprintf(stderr, "\n");
-        }
-    }
-}
-
 static ggml_status ggml_cannge_snapshot_indices(ggml_backend_cannge_context * ctx, ggml_cannge_plan * plan,
         const ggml_cannge_plan_io & io, std::vector<std::vector<int64_t>> & sr_slots) {
     // Capture indices before GE can reuse their buffers for later nodes.
@@ -735,7 +604,13 @@ enum ggml_status ggml_backend_cannge_graph_compute(ggml_backend_t backend, ggml_
     if (ggml_cannge_bind_outputs(ctx, plan, io, outputs, staged_ports) != GGML_STATUS_SUCCESS) {
         return GGML_STATUS_FAILED;
     }
-    ggml_cannge_debug_inputs(io);
+    if (getenv("GGML_CANNGE_DEBUG_IO")) {
+        for (auto * tensor : io.inputs) {
+            if (!ggml_cannge_debug_tensor("in", tensor, ctx->stream)) {
+                return GGML_STATUS_FAILED;
+            }
+        }
+    }
     const double dbg_t3 = g_dbg_time.on ? g_dbg_time.now() : 0;
 
     std::vector<std::vector<int64_t>> sr_slots;
@@ -753,7 +628,13 @@ enum ggml_status ggml_backend_cannge_graph_compute(ggml_backend_t backend, ggml_
     if (ggml_cannge_finish_execution(ctx, plan, io, staged_ports, sr_slots) != GGML_STATUS_SUCCESS) {
         return GGML_STATUS_FAILED;
     }
-    ggml_cannge_debug_outputs(ctx, io);
+    if (getenv("GGML_CANNGE_DEBUG_IO")) {
+        for (auto * tensor : io.output_tensors) {
+            if (!ggml_cannge_debug_tensor("out", tensor, ctx->stream)) {
+                return GGML_STATUS_FAILED;
+            }
+        }
+    }
     if (g_dbg_time.on) {
         const double t = g_dbg_time.now();
         g_dbg_time.analyze += dbg_t1 - dbg_t0;

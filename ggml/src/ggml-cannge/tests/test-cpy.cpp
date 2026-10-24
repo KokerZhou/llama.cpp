@@ -1,4 +1,5 @@
 #include "cpy.h"
+#include "debug.h"
 #include "plan.h"
 #include "ggml-impl.h"
 
@@ -151,6 +152,35 @@ static void test_batched_row_conversion() {
 }
 
 int main() {
+    for (bool host : {false, true}) {
+        reset();
+        float source[] = {7, 8};
+        float storage[] = {0, 0};
+        auto t = tensor(GGML_TYPE_F32, 2, 1, storage);
+        if (host) { t.buffer = reinterpret_cast<ggml_backend_buffer_t>(&t); }
+        FILE * output = std::tmpfile();
+        check(output != nullptr, "diagnostic capture file");
+        check(aclrtMemcpyAsync(storage, sizeof(storage), source, sizeof(source), ACL_MEMCPY_DEVICE_TO_HOST, nullptr) == 0,
+              "queued diagnostic producer");
+        fail_sync = true;
+        check(!ggml_cannge_debug_tensor("test", &t, nullptr, output), "diagnostic rejects failed drain");
+        check(std::ftell(output) == 0 && copy_calls == 0, "failed drain prints no values or checksums");
+        fail_sync = false;
+        if (!host) {
+            fail_copy = 1;
+            check(!ggml_cannge_debug_tensor("test", &t, nullptr, output), "diagnostic rejects failed copy");
+            check(std::ftell(output) == 0, "failed copy prints no values or checksums");
+            fail_copy = 0;
+        }
+        check(ggml_cannge_debug_tensor("test", &t, nullptr, output), "diagnostic snapshot succeeds");
+        check(storage[0] == 7 && pending.empty(), "diagnostic observes completed host and device producers");
+        std::rewind(output);
+        char line[512]{};
+        check(std::fgets(line, sizeof(line), output) != nullptr && std::strstr(line, "i0=7") != nullptr,
+              "diagnostic prints completed values");
+        std::fclose(output);
+    }
+    reset();
     test_batched_row_conversion();
     float values[] = {1, 2, 3, 4};
     float destination[6]{};

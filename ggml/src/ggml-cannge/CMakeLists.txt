@@ -94,6 +94,7 @@ if (CANN_INSTALL_DIR)
                              graph.cpp
                              context.cpp
                              cpy.cpp
+                             debug.cpp
                              supports.cpp
                              view.cpp
                              view.h

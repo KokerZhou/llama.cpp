@@ -25,7 +25,7 @@ target_compile_features(test-cannge-lifecycle PRIVATE cxx_std_17)
 target_include_directories(test-cannge-lifecycle PRIVATE stubs .. ../.. ../../../include)
 add_test(NAME cannge-lifecycle COMMAND test-cannge-lifecycle)
 
-add_executable(test-cannge-cpy test-cpy.cpp metadata-stubs.cpp ../cpy.cpp)
+add_executable(test-cannge-cpy test-cpy.cpp metadata-stubs.cpp ../cpy.cpp ../debug.cpp)
 target_compile_features(test-cannge-cpy PRIVATE cxx_std_17)
 target_include_directories(test-cannge-cpy PRIVATE stubs .. ../.. ../../../include)
 add_test(NAME cannge-cpy COMMAND test-cannge-cpy)
