@@ -81,6 +81,46 @@ The probe prints the failing phase and GE error, then exits 90 without cleanup o
 
 ### Format investigation
 
-On 2026-10-24 the unchanged large probe was run with `DUMP_GE_GRAPH=2`, `DUMP_GRAPH_LEVEL=3`, and `DUMP_GRAPH_PATH` pointing to a separate validation artifact directory, under the same 90-second timeout. It again exited 90. This installation emitted a task-trace JSON, not a graph with tensor descriptors. The trace lists TransData (task 2), the same failing BatchMatMulV3 kernel (task 3), and Cast (task 4), each with eight blocks. Thus a conversion kernel is present; the trace alone does not prove its source/destination format or correctness.
+On 2026-10-24 the unchanged large probe was run with `DUMP_GE_GRAPH=2`, `DUMP_GRAPH_LEVEL=3`, and `DUMP_GRAPH_PATH` pointing to a separate validation artifact directory, under the same 90-second timeout. It again exited 90. The trace lists TransData (task 2), the same failing BatchMatMulV3 kernel (task 3), and Cast (task 4), each with eight blocks. The initial inspection incorrectly reported that only a task trace was emitted: it listed only the top-level directory and missed the graph files in `pid_18752_deviceid_0`. Recursive inspection recovered `ge_proto_00000000_graph_1_Build.txt` and its ONNX counterpart.
 
-Artifacts: `ge-probe-format-dump.log` and `ge-probe-format-dump/debug_graph_1_1792772498_18752_1.json` in the remote validation directory. Local copies are in `cannge-validation-310-49e9873`, with the JSON named `ge-probe-final-graph.json` (despite that filename, its content is a task trace). No probe process remained after this run. See [API-AUDIT.md](API-AUDIT.md) for the version-pinned operator source findings and remaining metadata gap.
+Artifacts: `ge-probe-format-dump.log` and the recursive `ge-probe-format-dump` directory in the remote validation directory. Local copies are in `cannge-validation-310-49e9873`, with an additional JSON copy named `ge-probe-final-graph.json` (despite that filename, its content is a task trace). No probe process remained after this run.
+
+The unchanged small probe was also rerun with level 1, `DUMP_GRAPH_FORMAT=ge_proto`, and info logging. It passed all 256 outputs and finalized successfully. Its final graph is `ge-probe-small-dump/pid_22470_deviceid_0/ge_proto_00000087_graph_1_Build.txt`, copied locally as `ge-probe-small-build.txt`.
+
+| BatchMatMulV3 descriptor | Passing control | Failing projection |
+| --- | --- | --- |
+| Input A, FP16 ND | `[16,256]` | `[16,2560]` |
+| Input B, FP16 FRACTAL_NZ | `[16,1,16,16]` | `[160,256,16,16]` |
+| B original ND shape | `[16,256]` | `[4096,2560]` |
+| Output, FP16 ND | `[16,16]` | `[16,4096]` |
+| Transpose attributes | `adj_x1=false, adj_x2=true` | Same |
+
+Both graphs insert TransData on B and match the installed 310P ND/NZ -> ND registration. This rules out a missing format conversion in the compiled graph, but does not validate converted values or tiling. See [API-AUDIT.md](API-AUDIT.md) for the version-pinned source findings.
+
+### Kernel and exception evidence
+
+Before SSH became unavailable, both unchanged probes were rerun in separate `ge-probe-kernel-evidence` and `ge-probe-small-kernel-evidence` directories with `NPU_COLLECT_PATH` set to the corresponding directory, `ASCEND_GLOBAL_LOG_LEVEL=1`, and `ASCEND_SLOG_PRINT_TO_STDOUT=1`. This retains compilation and exception artifacts; it is not a benchmark configuration. The small probe passed and finalized. The large probe exited 90 with the same MTE on-chip write-out-of-bounds error. Collection changed the generated kernel hash to `te_batchmatmulv3_239f1345519b31ab6f1b63e5e3c236b1cbeb0b10314bf773646b2ffeec814ad5`; do not describe this as the identical binary from the earlier run.
+
+The final `SetL2CacheFlag` log, after intermediate tiling calculations, reports:
+
+| Tiling field | Passing control | Failing projection |
+| --- | --- | --- |
+| Operator tiling key | `0x10000` | `0x10000` |
+| baseM, baseN, baseK | `16,16,256` | `16,256,64` |
+| singleCoreM, singleCoreN, singleCoreK | `16,16,256` | `16,256,2560` |
+| stepM, stepN | `1,1` | `1,1` |
+| stepKa, stepKb | `3,3` | `3,3` |
+| depthA1, depthB1 | `6,6` | `6,6` |
+
+The failing kernel metadata reports eight blocks and 20,971,520 bytes of workspace. The runtime's separate `tilingKey=0` field must not be confused with the operator compiler's `0x10000` selection.
+
+The installed `tools/operator_cmp/compare/msaccucmp.py convert` parsed the exception dump into NumPy arrays. An elementwise check of both input arrays found:
+
+- A: FP16 shape `[16,2560]`, 40,960 elements, all finite and exactly one.
+- B: FP16 shape `[160,256,16,16]`, 10,485,760 elements, all finite and exactly one.
+
+This confirms the expected input values are present in the exception snapshot for this uniform-input reproducer. Uniform values cannot validate general ND/NZ permutation ordering, and the failed output is not a correctness result. The captured instruction addresses have an offset of `0xb2c` from the reported kernel start; the installed llvm-objdump printed `<not available>` there, so no instruction-level cause has been established.
+
+Local evidence includes `ge-probe-kernel-evidence.log`, `ge-probe-small-kernel-evidence.log`, and `bmm-kernel-evidence.json` in `cannge-validation-310-49e9873`. The binary, original exception dump, converted arrays, and disassembly remain in the remote evidence directory; they were not all downloaded. The server log clock reads October 23 while the client date is October 24; preserve the original filenames when correlating artifacts.
+
+Next device experiments should vary N and K independently (M fixed at 16), starting with `(N,K)=(16,2560)` and `(4096,256)`. They distinguish the wide-output tile from the long contraction; they are not yet run. Do not encode either dimension as a backend rejection threshold from the two existing cases.
