@@ -124,3 +124,27 @@ This confirms the expected input values are present in the exception snapshot fo
 Local evidence includes `ge-probe-kernel-evidence.log`, `ge-probe-small-kernel-evidence.log`, and `bmm-kernel-evidence.json` in `cannge-validation-310-49e9873`. The binary, original exception dump, converted arrays, and disassembly remain in the remote evidence directory; they were not all downloaded. The server log clock reads October 23 while the client date is October 24; preserve the original filenames when correlating artifacts.
 
 Next device experiments should vary N and K independently (M fixed at 16), starting with `(N,K)=(16,2560)` and `(4096,256)`. They distinguish the wide-output tile from the long contraction; they are not yet run. Do not encode either dimension as a backend rejection threshold from the two existing cases.
+
+## Dimension batch and diagnostic refactor, 2026-10-24
+
+The later run completed those independent experiments using exact source `a790f595e27bd3e102dd24155c98ee6777aabfd8` in `/workspace/cannge-validation-a790f59/source`. The transferred source archive SHA-256 was `087b0c5298cdf9f843d7e81d70aee9c8d879f3be73cf2c4c942e5ac409378f2e`, verified at both ends. It contains the checked diagnostic reader from `f8492a8` and the configurable probe/batch runner from `a790f59`. The collaborator checkout remained untouched and dirty at `d3a3ef81f` on `cannge`. The host container name changed to `ad2f550545f6`; device and SDK remained Ascend310P3/CANN 9.1.0, driver 26.0.rc1.
+
+The full SDK build of `test-backend-ops` succeeded. All six standalone tests passed both locally with MSVC and on the host with GCC. The direct probe's build also succeeded. The runner's Git provenance commands report an archive without `.git`; the archive revision and hash above supply that provenance.
+
+| M | N | K | Result | Base tile M,N,K |
+| --- | --- | --- | --- | --- |
+| 16 | 16 | 256 | Pass, exit 0 | 16,16,256 |
+| 16 | 16 | 2560 | Pass, exit 0 | 16,16,1024 |
+| 16 | 4096 | 256 | Pass, exit 0 | 16,256,64 |
+| 16 | 4096 | 768 | Pass, exit 0 | 16,256,64 |
+| 16 | 4096 | 2048 | MTE failure, exit 90 | 16,256,64 |
+| 16 | 4096 | 2304 | MTE failure, exit 90 | See retained compiler log |
+| 16 | 4096 | 2560 | MTE failure, exit 90 | 16,256,64 |
+
+The four runner cases are in `matmul-batch/results.json`; the additional cases are separate bounded runs in `k768`, `k2048`, and `k2304`. No case timed out. All passing cases checked every output against K. Both independent dimension cases pass, so neither large N nor large K alone explains the observed failure. The wide-N passing case shares the failing projection's base tile, buffering depths and K steps. K=2304 is divisible by the observed 192-element K step, so the failure does not require a final partial step. These observations narrow the reproducer; they do not establish a safe rejection threshold or justify modifying SDK tiling values.
+
+The installed SDK's `asc/impl/adv_api/detail/matmul/stage/copy_cube_in` headers were copied locally for read-only inspection. `copy_tile_to_cube_using_ub.h` selects `CopyND2NZWithVecOp` for ND input when `enVecND2NZ` is enabled; `data_copy_wrapper_using_ub_nd.h` uses local workspace, vector conversion and a copy into the cube input buffer. The NZ operand follows a separate copy wrapper. This is a source trace, not proof that either specific copy caused the reported fault; instruction disassembly remains unavailable.
+
+For the diagnostic refactor, a single exported F16/F16 MUL_MAT fixture with ggml source shapes `[256,16,1,1]` and output `[16,16,1,1]` was run using the newly built backend, `GGML_CANNGE_GRAPH=1`, `GGML_CANNGE_DEBUG_IO=1`, the new status guard, and a 120-second timeout. The case passed CPU comparison (1/1 executed), exited 0, and emitted five `[DBG-IO]` lines. This validates the real diagnostic path; injected copy/drain failures remain covered by the standalone tests rather than real-runtime fault injection.
+
+Logs and the fixture were archived to `evidence.tar.gz` in the validation directory and downloaded as `cannge-validation-310-49e9873/a790f59-evidence.tar.gz`. The final check found healthy, idle devices and no remaining probe or backend-test processes. No SDK changes, device resets, history rewrites or pushes were performed. Large-matmul correctness, shutdown recovery after runtime faults, model accuracy and blocking-copy benchmarks remain outstanding.
