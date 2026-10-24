@@ -86,3 +86,17 @@ Confirm actual CANNGE execution and host-scatter use; CPU fallback or in-graph s
 ## Completion evidence
 
 Retain build logs, executed-case counts, numerical results, recovery observations and paired benchmark samples. Resolve failures before removing experimental gates or claiming the series is hardware-validated. The existence of this checklist does not satisfy any of these checks.
+
+## Retained model-logit comparison tools
+
+`model-check.cpp` is a standalone executable source to link against the same built llama and ggml libraries used for validation. It takes `MODEL CPU|CANNGE0 OUTPUT`, records a fixed prompt and forced continuation, clears memory between two rounds, and writes vocabulary/step/round dimensions followed by float32 logits. It is not registered as a default CTest target and requires a real model. Preserve the build revision, SDK, model hash and backend options with each run.
+
+Run the linked executable once for CPU and once for CANNGE0, then compare:
+
+```sh
+python compare-logits.py cpu-logits.bin device-logits.bin comparison.json
+```
+
+The comparator requires finite values, matching shapes and top-1 results, NMSE below 1e-5, and device repeat NMSE below 1e-6. It rejects truncated or extra binary data. A failure returns nonzero; do not loosen these tolerances after seeing a result.
+
+The retained RAII harness revision passed local C++ syntax checking, and the comparator passed synthetic checks for identity, divergence, non-finite values, binary round-trip and truncation. The revised harness still needs linked build and device validation; earlier device results do not certify this revision.
