@@ -166,3 +166,17 @@ The same Qwen3-4B harness then completed both prompt/decode rounds and normal sh
 Thus model correctness is not established. The large, non-repeatable decode errors require separate state/lifetime or operation isolation; they cannot be dismissed as the small precision drift seen earlier on 910. The CPU reference and harness are the previously recorded 310 validation artifacts; the harness ran against the candidate `build/bin` libraries through `LD_LIBRARY_PATH`.
 
 Artifacts in `/workspace/cannge-validation-a790f59`: `matmul-v2/small.log`, `matmul-v2/projection.log`, its recursive final graph dump, `matmul-v2-backend-build.log`, `matmul-v2-projections.log`, `matmul-v2-small.log`, `matmul-v2-model.stderr`, and `matmul-v2-model-comparison.json`. The clean synchronization checkout is `/workspace/llama.cpp-cannge`; the dirty collaborator checkout at `/root/cannge-ggml` remains preserved. The 910 endpoint is currently unavailable, so its synchronization and validation remain pending.
+
+## Decode RoPE isolation and correction
+
+Disabling CANNGE matmul did not remove the large decode error (3/20 top-one matches, non-repeatable rounds). Enabling the checked IO diagnostics, which adds synchronization, also did not remove it (6/20 matches). The scatter opt-in did not remove it either. These controls do not independently certify every remaining operation, but they exclude a simple matmul-only or missing-drain explanation.
+
+Comparing the first decode's IO traces across the two identical rounds found matching graph inputs and cache snapshots, then the first mismatch at `Qcur-0`. Head zero samples matched while later heads contained differing tiny values. With `GGML_CANNGE_NO_ROPE=1`, all 20 top-one results matched CPU and repeated device rounds became identical. Residual NMSE still exceeded `1e-5` (worst `3.474900637365383e-5`), so this control was not declared a full numerical pass.
+
+The new `rope-heads.txt` fixture reproduced the fused NEOX failure at F32 `[128,32,1,1]`: error `3.052770421` against a `1e-7` operator limit (0/1 passed). NORMAL mode failed compilation with `current soc does not support interleaved`, despite the installed registry listing the operator's FP16/FP32 types. These are durable operator reproductions of two problems in the fused lowering, rather than deductions solely from model logits.
+
+The corrected builder uses the explicit rotation formula in canonical `[B,T,H,D]` layout. SDK build succeeded; all eight F16/F32, NORMAL/NEOX, one/two-token cases passed CPU comparison. Two additional rank-four batch controls passed (2/2), giving 10/10 focused cases. Local standalone regressions remain 6/6. Emission version is 5.
+
+A model run with the primitive builder and `GGML_CANNGE_GEMV16=0` completed and finalized normally: finite logits, 20/20 top-one matches, exactly repeated rounds. Worst NMSE was `3.3927184261060114e-5` and maximum absolute error `0.10717391967773438`, so the predeclared model limit still failed. This establishes removal of the catastrophic decode corruption, not full numerical validation or a justification for relaxing the limit. A default-options run and precision-policy investigation follow separately.
+
+Artifacts include `matmul-v2-no-matmul-comparison.json`, `matmul-v2-debug.stderr`, `matmul-v2-debug-comparison.json`, `matmul-v2-no-rope-comparison.json`, `rope-heads-before.log`, `rope-neox-before.log`, `rope-primitive-build.log`, `rope-heads-after.log`, `rope-batch-after.log`, and `rope-primitive-gemv32-comparison.json` in the same isolated validation directory.

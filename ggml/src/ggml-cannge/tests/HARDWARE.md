@@ -41,6 +41,8 @@ export GGML_CANNGE_GRAPH=1
 
 Check the actual executed and skipped case counts. A successful command with no matched device or no executed operations is not validation. Inspect rejected configurations separately from numerical failures. Add focused cases where the existing operator suite lacks coverage:
 
+`--test-file ggml/src/ggml-cannge/tests/rope-heads.txt` covers ten RoPE cases: F16/F32, NORMAL/NEOX, one/two tokens with 32 heads, and two rank-four batch controls. Its numeric enum/parameter encoding is tied to this ggml revision, like `matmul-projection.txt`; regenerate if the enum or operation parameter layout changes. Run with the status guard above and compare every executed case against CPU.
+
 - F16/F32 dense and strided copies, transposed views, offset views and aliased outputs.
 - Single-row and batched SET_ROWS, both conversion directions, partial cache views and repeated updates.
 - Matrix multiplication, GEMV and GQA modes; verify the accepted policy against actual execution.

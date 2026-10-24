@@ -46,7 +46,6 @@ bool ggml_cannge_build_rope(ggml_cannge_build_context & ctx, ggml_tensor * node)
             // ggml_rope_cache_init theta recurrence, ggml.h rope_ext comment)
             const int     n_dims    = ggml_get_op_params_i32(node, 1);
             const int     mode      = ggml_get_op_params_i32(node, 2);
-            const int     nd        = ggml_n_dims(src0);
             const int64_t n_tok     = src1->ne[0];
             const int64_t half      = n_dims / 2;
             float         freq_base = 10000.0f;
@@ -63,10 +62,9 @@ bool ggml_cannge_build_rope(ggml_cannge_build_context & ctx, ggml_tensor * node)
             auto cos_t = cannge_es::Cos(theta); // include/es/es_math/es_Cos.h
             auto sin_t = cannge_es::Sin(theta); // include/es/es_math/es_Sin.h
 
-            // the GE op takes full-width per-position tables (layout 11SD):
+            // Full-width per-position tables follow the rotation pairing:
             // NORMAL pairs are adjacent so each value is pair-duplicated,
             // NEOX tables duplicate the half
-            // spec: https://www.mindspore.cn/docs/en/master/api_python/ops/mindspore.ops.rotary_position_embedding.html
             auto cos_tab = cos_t;
             auto sin_tab = sin_t;
             std::vector<cannge_es::EsTensorHolder> two_cos = { cos_t, cos_t };
@@ -86,47 +84,40 @@ bool ggml_cannge_build_rope(ggml_cannge_build_context & ctx, ggml_tensor * node)
                 cos_tab = dup_pairs(cos_t);
                 sin_tab = dup_pairs(sin_t);
             }
+            // Use canonical [B,T,H,D] order for both decode and prefill.
+            const int64_t batch = src0->ne[3], heads = src0->ne[1];
+            const std::vector<int64_t> shape4 = { batch, n_tok, heads, n_dims };
+            auto x4 = cannge_es::Reshape(es0, shape4);
             if (src0->type != GGML_TYPE_F32) {
-                // GE requires cos/sin in x's dtype
-                ge::DataType xdt;
-                if (!ggml_cannge_ge_dtype(src0->type, xdt)) {
-                    return ctx.fail(std::string("unsupported rope dtype ") + node->name);
+                x4 = cannge_es::Cast(x4, (int64_t) ge::DT_FLOAT);
+            }
+            cannge_es::EsTensorHolder rotated;
+            if (mode == GGML_ROPE_TYPE_NEOX) {
+                const std::vector<int64_t> size = { batch, n_tok, heads, half };
+                auto first = cannge_es::Slice(x4, std::vector<int64_t>{0, 0, 0, 0}, size);
+                auto second = cannge_es::Slice(x4, std::vector<int64_t>{0, 0, 0, half}, size);
+                rotated = cannge_es::Concat(ctx.scalar_cached((int32_t) 3),
+                        {cannge_es::Sub(ctx.scalar_cached(0.0f), second), first}, 2);
+            } else {
+                auto pairs = cannge_es::Reshape(x4, std::vector<int64_t>{batch, n_tok, heads, half, 2});
+                const std::vector<int64_t> size = { batch, n_tok, heads, half, 1 };
+                auto even = cannge_es::Slice(pairs, std::vector<int64_t>{0, 0, 0, 0, 0}, size);
+                auto odd = cannge_es::Slice(pairs, std::vector<int64_t>{0, 0, 0, 0, 1}, size);
+                rotated = cannge_es::Concat(ctx.scalar_cached((int32_t) 4),
+                        {cannge_es::Sub(ctx.scalar_cached(0.0f), odd), even}, 2);
+                rotated = cannge_es::Reshape(rotated, shape4);
+            }
+            const std::vector<int64_t> table_shape = { 1, n_tok, 1, n_dims };
+            auto y = cannge_es::Add(cannge_es::Mul(x4, cannge_es::Reshape(cos_tab, table_shape)),
+                                    cannge_es::Mul(rotated, cannge_es::Reshape(sin_tab, table_shape)));
+            if (node->type != GGML_TYPE_F32) {
+                ge::DataType dtype;
+                if (!ggml_cannge_ge_dtype(node->type, dtype)) {
+                    return ctx.fail(std::string("unsupported rope output dtype ") + node->name);
                 }
-                cos_tab = cannge_es::Cast(cos_tab, (int64_t) xdt);
-                sin_tab = cannge_es::Cast(sin_tab, (int64_t) xdt);
+                y = cannge_es::Cast(y, (int64_t) dtype);
             }
-
-            // x: ggml [D, H, T, B] -> GE [B?, T, H, D]; the op wants BNSD
-            // [B, H, T, D], so swap the token and head axes (prepend a dummy
-            // batch for 3D inputs). Decode is 2D [D, H] with T=1: (d, h)
-            // memory already matches [1, H, 1, D] row-major, plain reshape
-            const std::vector<int64_t> to_bnsd =
-                nd == 3 ? std::vector<int64_t>{ 1, 0, 2 } : std::vector<int64_t>{ 0, 2, 1, 3 };
-            cannge_es::EsTensorHolder x4;
-            if (nd == 2) {
-                x4 = cannge_es::Reshape(es0, std::vector<int64_t>{ 1, src0->ne[1], 1, (int64_t) n_dims });
-            } else {
-                x4 = cannge_es::Permute(es0, to_bnsd);
-            }
-            if (nd == 3) {
-                const std::vector<int64_t> shape_bnsd = { 1, src0->ne[1], n_tok, (int64_t) n_dims };
-                x4 = cannge_es::Reshape(x4, shape_bnsd);
-            }
-            // GE mode 0 = rotate_half (NeoX), 1 = rotate_interleaved (GPT-J == ggml NORMAL)
-            const std::vector<int64_t> shape_11sd = { 1, 1, n_tok, (int64_t) n_dims };
-            auto y = cannge_es::RotaryPositionEmbedding(x4, cannge_es::Reshape(cos_tab, shape_11sd),
-                                                        cannge_es::Reshape(sin_tab, shape_11sd), nullptr,
-                                                        mode == GGML_ROPE_TYPE_NEOX ? 0 : 1);
-            if (nd == 2) {
-                y = cannge_es::Reshape(y, ggml_cannge_ge_shape(node));
-            } else if (nd == 3) {
-                const std::vector<int64_t> shape3 = { src0->ne[1], n_tok, (int64_t) n_dims };
-                const std::vector<int64_t> perm3  = { 1, 0, 2 };
-                y = cannge_es::Reshape(y, shape3);
-                y = cannge_es::Permute(y, perm3);
-            } else {
-                y = cannge_es::Permute(y, std::vector<int64_t>{ 0, 2, 1, 3 });
-            }
+            y = cannge_es::Reshape(y, ggml_cannge_ge_shape(node));
             ctx.tensors[node] = y;
             return true;
         }
