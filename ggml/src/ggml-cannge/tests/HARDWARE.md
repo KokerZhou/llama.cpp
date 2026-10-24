@@ -59,6 +59,8 @@ python3 ggml/src/ggml-cannge/tests/run-ge-probes.py \
   --output /workspace/cannge-matmul-batch-UNIQUE
 ```
 
+Use `--operator matmul-v2` with a different output directory to compare the public rank-two interface against the default BatchMatMulV3 reproducer. `--operator matmul` selects MatMulV3, whose inference registration failed in the observed installation. The MatMulV2 mode uses GE's public graph factory because this SDK has no generated ES wrapper for it.
+
 The output directory must be new and outside the checkout. The runner builds the direct probe, records its hash and local Git/device provenance, and runs each shape in a separate process with graph dumps, compiler logs and exception collection. It performs no network operations or device resets. Source the SDK environment first; this runner does not install dependencies. Archives without Git metadata retain the probe hash but require the archive revision to be recorded separately.
 
 The passing small control is mandatory. A failed control or timeout stops the batch; ordinary failures in the other cases are recorded and the batch continues. The runner kills only its command's process group after each command to reclaim compiler children. Inspect `results.json`, recursive graph dump directories and logs, not just the runner's exit code. This batch intentionally uses uniform FP16 inputs and does not replace model accuracy, general format-conversion, recovery or performance validation.

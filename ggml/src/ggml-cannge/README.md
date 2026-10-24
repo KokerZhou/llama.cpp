@@ -24,6 +24,7 @@ The layout follows the sibling CPU/CUDA backends: a backend entry point, shared 
 | `rope.cpp` | Rotary position embedding |
 | `graph-build.cpp` | Assemble graph inputs, nodes and output ports |
 | `mul-mat.cpp` | Matrix multiplication, GEMV and associated cache-row splicing |
+| `mul-mat-ge.cpp` | Checked ES adapter for the public rank-two MatMulV2 graph operator |
 | `fattn.cpp` | Flash-attention mapping |
 | `graph-build-io.cpp` | Graph inputs and fresh-row splicing |
 | `graph-build-view.cpp` | Tensor lookup, views, axis relabeling and checked prefix slices |

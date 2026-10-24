@@ -148,3 +148,21 @@ The installed SDK's `asc/impl/adv_api/detail/matmul/stage/copy_cube_in` headers 
 For the diagnostic refactor, a single exported F16/F16 MUL_MAT fixture with ggml source shapes `[256,16,1,1]` and output `[16,16,1,1]` was run using the newly built backend, `GGML_CANNGE_GRAPH=1`, `GGML_CANNGE_DEBUG_IO=1`, the new status guard, and a 120-second timeout. The case passed CPU comparison (1/1 executed), exited 0, and emitted five `[DBG-IO]` lines. This validates the real diagnostic path; injected copy/drain failures remain covered by the standalone tests rather than real-runtime fault injection.
 
 Logs and the fixture were archived to `evidence.tar.gz` in the validation directory and downloaded as `cannge-validation-310-49e9873/a790f59-evidence.tar.gz`. The final check found healthy, idle devices and no remaining probe or backend-test processes. No SDK changes, device resets, history rewrites or pushes were performed. Large-matmul correctness, shutdown recovery after runtime faults, model accuracy and blocking-copy benchmarks remain outstanding.
+
+## Rank-two MatMulV2 correction
+
+A subsequent direct GE probe built the same F16/F16 matrices through the public MatMulV2 graph prototype. Both the small control and M=16, N=4096, K=2560 passed every output check, graph removal, and finalization. The final graph retained MatMulV2 and used `te_matmulv2_0adf6b3e1f31eb2db886284e685d202c60adb070be03563035f13b864ad7fe7b__kernel0`. It did not select the failing BatchMatMulV3 kernel. In the probe, `matmul-v2` constructs the public graph directly because no corresponding generated ES wrapper is installed.
+
+The backend candidate uses MatMulV2 only for two rank-two operands; it preserves batched lowering and the existing padding/casts. Its checked ES adapter uses the public prototype's input/output/attribute definitions and leaves inference validation enabled. Cache emission version is 4. An initial factory-based adapter could not find the prototype before GE initialization, so it was replaced before validation with explicit ES node construction, following the SDK's own ES pattern.
+
+The isolated SDK build used the `a790f59` snapshot plus the recorded candidate patches and `mul-mat-ge.cpp`. Patch preimages were verified against local Git blob hashes after accounting for CRLF line endings in the source archive. The final adapter compiled and linked successfully. The six standalone regressions passed locally and on the host. The three committed projection fixtures now all pass CPU comparison (3/3), including mixed F16/F32 and aligned M=16 cases. All 36 supported selected small matmuls (`m=16,n=.,k=256,`) also pass. Numerical runs use the synchronization-aware status guard and external timeouts.
+
+The same Qwen3-4B harness then completed both prompt/decode rounds and normal shutdown with the candidate libraries (paths verified with `ldd`). This removes the earlier projection crash but exposes a separate decode correctness failure:
+
+- All logits are finite; prompt NMSE is `8.488455827696573e-6`, below the predeclared `1e-5` limit.
+- Decode NMSE reaches `6.794395952671169`; only 6/20 top-one comparisons match CPU, with maximum absolute error `20.067551612854004`.
+- Repeated device rounds differ (repeat NMSE up to about `0.0514`); the CPU reference repeats exactly.
+
+Thus model correctness is not established. The large, non-repeatable decode errors require separate state/lifetime or operation isolation; they cannot be dismissed as the small precision drift seen earlier on 910. The CPU reference and harness are the previously recorded 310 validation artifacts; the harness ran against the candidate `build/bin` libraries through `LD_LIBRARY_PATH`.
+
+Artifacts in `/workspace/cannge-validation-a790f59`: `matmul-v2/small.log`, `matmul-v2/projection.log`, its recursive final graph dump, `matmul-v2-backend-build.log`, `matmul-v2-projections.log`, `matmul-v2-small.log`, `matmul-v2-model.stderr`, and `matmul-v2-model-comparison.json`. The clean synchronization checkout is `/workspace/llama.cpp-cannge`; the dirty collaborator checkout at `/root/cannge-ggml` remains preserved. The 910 endpoint is currently unavailable, so its synchronization and validation remain pending.

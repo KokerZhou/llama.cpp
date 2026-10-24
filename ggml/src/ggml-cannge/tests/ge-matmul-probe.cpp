@@ -4,6 +4,7 @@
 #include <es_nn/es_nn_ops.h>
 #include <es_math/es_math_ops.h>
 #include <graph/tensor.h>
+#include <graph/operator_factory.h>
 #include <acl/acl.h>
 #include <cmath>
 #include <charconv>
@@ -27,7 +28,8 @@ int main(int argc, char ** argv) {
     const int64_t M = 16;
     int64_t N = 4096, K = 2560;
     const bool matmul = argc > 1 && std::strcmp(argv[1], "matmul") == 0;
-    bool valid = argc == 1 || (argc >= 2 && (matmul || std::strcmp(argv[1], "bmm") == 0));
+    const bool legacy = argc > 1 && std::strcmp(argv[1], "matmul-v2") == 0;
+    bool valid = argc == 1 || (argc >= 2 && (matmul || legacy || std::strcmp(argv[1], "bmm") == 0));
     if (argc == 3 && std::strcmp(argv[2], "small") == 0) {
         N = 16; K = 256;
     } else if (argc == 4) {
@@ -41,10 +43,10 @@ int main(int argc, char ** argv) {
         valid = false;
     }
     if (!valid || N * K > 32 * 1024 * 1024) {
-        std::fprintf(stderr, "usage: %s [bmm|matmul [small|N K]]; dimensions 1..8192, N*K <= 33554432\n", argv[0]);
+        std::fprintf(stderr, "usage: %s [bmm|matmul|matmul-v2 [small|N K]]; dimensions 1..8192, N*K <= 33554432\n", argv[0]);
         return 2;
     }
-    std::fprintf(stderr, "probe op=%s M=%lld N=%lld K=%lld\n", matmul ? "MatMulV3" : "BatchMatMulV3",
+    std::fprintf(stderr, "probe op=%s M=%lld N=%lld K=%lld\n", legacy ? "MatMulV2" : matmul ? "MatMulV3" : "BatchMatMulV3",
                  (long long) M, (long long) N, (long long) K);
     if (aclInit(nullptr) != 0 || aclrtSetDevice(0) != 0) return 2;
     std::map<ge::AscendString, ge::AscendString> options = {
@@ -64,6 +66,26 @@ int main(int argc, char ** argv) {
         check(ge::es::EsGraphBuilder::SetOutput(output, 0), "set output");
         auto graph = builder.BuildAndReset();
         if (!graph) return 3;
+        if (legacy) {
+            // MatMulV2 has a registered graph prototype but no installed ES wrapper.
+            const auto ad = ge::TensorDesc(ge::Shape({M, K}), ge::FORMAT_ND, ge::DT_FLOAT16);
+            const auto bd = ge::TensorDesc(ge::Shape({N, K}), ge::FORMAT_ND, ge::DT_FLOAT16);
+            auto input_a = ge::OperatorFactory::CreateOperator("a", "Data");
+            auto input_b = ge::OperatorFactory::CreateOperator("b", "Data");
+            input_a.SetAttr("index", int64_t(0));
+            input_b.SetAttr("index", int64_t(1));
+            check(input_a.UpdateInputDesc("x", ad), "a input descriptor");
+            check(input_a.UpdateOutputDesc("y", ad), "a output descriptor");
+            check(input_b.UpdateInputDesc("x", bd), "b input descriptor");
+            check(input_b.UpdateOutputDesc("y", bd), "b output descriptor");
+            auto mm = ge::OperatorFactory::CreateOperator("matmul", "MatMulV2");
+            mm.SetInput("x1", input_a).SetInput("x2", input_b);
+            mm.SetAttr("transpose_x1", false).SetAttr("transpose_x2", true);
+            auto cast = ge::OperatorFactory::CreateOperator("cast", "Cast");
+            cast.SetInput("x", mm).SetAttr("dst_type", int64_t(ge::DT_FLOAT));
+            graph.reset(new ge::Graph("projection-v2"));
+            graph->SetInputs({input_a, input_b}).SetOutputs({cast});
+        }
         check(session.AddGraphWithCopy(1, *graph), "add graph");
         std::vector<uint16_t> ah(M*K, 0x3c00), bh(N*K, 0x3c00);
         std::vector<ge::Tensor> inputs;

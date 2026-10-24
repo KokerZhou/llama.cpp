@@ -47,10 +47,12 @@ def main():
     parser.add_argument("--sdk", type=Path, default=os.environ.get("ASCEND_TOOLKIT_HOME"))
     parser.add_argument("--compiler", default="g++")
     parser.add_argument("--timeout", type=int, default=120)
+    parser.add_argument("--operator", choices=("bmm", "matmul", "matmul-v2"), default="bmm")
     parser.add_argument("--plan", action="store_true", help="print cases without building or touching hardware")
     args = parser.parse_args()
     if args.plan:
-        print(json.dumps([{"case": name, "M": 16, "N": n, "K": k} for name, n, k in CASES], indent=2))
+        print(json.dumps([{"case": name, "operator": args.operator, "M": 16, "N": n, "K": k}
+                          for name, n, k in CASES], indent=2))
         return 0
     if sys.platform != "linux" or not args.sdk or not args.output or args.timeout <= 0:
         parser.error("execution requires Linux, --sdk (or ASCEND_TOOLKIT_HOME), --output and a positive timeout")
@@ -68,7 +70,7 @@ def main():
                 "NPU_COLLECT_PATH", "ASCEND_WORK_PATH", "LD_PRELOAD", "IGNORE_INFER_ERROR"):
             env.pop(key)
     results = {"probe_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
-               "sdk": str(sdk), "cases": [], "timeout_seconds": args.timeout}
+               "sdk": str(sdk), "operator": args.operator, "cases": [], "timeout_seconds": args.timeout}
     report = directory / "results.json"
 
     def save():
@@ -99,7 +101,7 @@ def main():
         case_env = dict(env, DUMP_GE_GRAPH="2", DUMP_GRAPH_LEVEL="3", DUMP_GRAPH_FORMAT="ge_proto",
                         DUMP_GRAPH_PATH=str(case_dir), NPU_COLLECT_PATH=str(case_dir),
                         ASCEND_GLOBAL_LOG_LEVEL="1", ASCEND_SLOG_PRINT_TO_STDOUT="1")
-        result = run([str(binary), "bmm", str(n), str(k)], case_dir, case_dir / "run.log",
+        result = run([str(binary), args.operator, str(n), str(k)], case_dir, case_dir / "run.log",
                      case_env, args.timeout)
         result.update(case=name, M=16, N=n, K=k)
         log_text = (case_dir / "run.log").read_text(errors="replace")

@@ -9,6 +9,15 @@
 #include <cstdlib>
 
 const char * ggml_type_name(ggml_type) { return "test-type"; }
+static int matmul_2d_calls = 0;
+static bool fail_matmul_2d = false;
+bool ggml_cannge_build_matmul_2d(ggml_cannge_build_context & ctx,
+        const ge::es::EsTensorHolder &, const ge::es::EsTensorHolder &, ge::es::EsTensorHolder & output) {
+    ++matmul_2d_calls;
+    if (fail_matmul_2d) { return ctx.fail("injected MatMulV2 build failure"); }
+    output = ge::es::make_holder();
+    return true;
+}
 // Assembly cases use only external inputs and allocate no plan buffers.
 ggml_cannge_plan::~ggml_cannge_plan() = default;
 bool ggml_cannge_build_node(ggml_cannge_build_context &, ggml_tensor *) { std::abort(); }
@@ -36,11 +45,19 @@ int main() {
         output.src[0] = &weights; output.src[1] = &input;
         matmul_ctx.tensors[&weights] = {1}; matmul_ctx.tensors[&input] = {2};
         ge::es::concat_calls = ge::es::slice_calls = 0;
+        matmul_2d_calls = 0;
         check(ggml_cannge_build_matmul(matmul_ctx, &output), "build F32 matmul with M=8");
+        check(matmul_2d_calls == (rank == 2 ? 1 : 0), "only rank-two operands select MatMulV2");
         check(ge::es::concat_calls == (rank == 2 ? 1 : 0), "only rank-2 matmul pads M");
         check(ge::es::slice_calls == (rank == 2 ? 1 : 0), "only rank-2 matmul slices M");
         if (rank == 2) {
             check(ge::es::last_slice_size == std::vector<int64_t>({8, 16}), "padding restores output shape");
+            matmul_ctx.tensors.erase(&output);
+            fail_matmul_2d = true;
+            check(!ggml_cannge_build_matmul(matmul_ctx, &output), "rank-two builder failure propagates");
+            check(matmul_ctx.tensors.count(&output) == 0 && matmul_error == "injected MatMulV2 build failure",
+                  "failed MatMulV2 publishes no output and preserves diagnostic");
+            fail_matmul_2d = false;
         }
     }
     using result = ggml_cannge_build_result;

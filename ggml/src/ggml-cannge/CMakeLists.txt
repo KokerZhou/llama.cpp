@@ -103,6 +103,7 @@ if (CANN_INSTALL_DIR)
                              ge.cpp
                              graph-build.cpp
                              mul-mat.cpp
+                             mul-mat-ge.cpp
                              fattn.cpp
                              graph-build-view.cpp
                              graph-build-io.cpp

@@ -298,16 +298,9 @@ bool ggml_cannge_build_matmul(ggml_cannge_build_context & ctx, ggml_tensor * nod
         ctx.tensors[node] = sum;
         return true;
     }
-    // mixed f16 weights x f32 activations (weights allocated on this
-    // backend after the gate relaxed, note-46 batch 12a): BatchMatMulV3
-    // needs one dtype - cast both to f32, matching ggml's f32
-    // accumulation and the always-f32 mul_mat result
-    bool mixed = src0->type != src1->type;
+    const bool mixed = src0->type != src1->type;
     if (mixed) {
-        // mixed f16 weights x f32 activations (weights allocated on this
-        // backend after the gate relaxed, note-46 batch 12a): BatchMatMulV3
-        // needs one dtype - cast both to f32, matching ggml's f32
-        // accumulation and the always-f32 mul_mat result
+        // Match input types; GE precision policy still controls the kernel computation.
         ge::DataType f32;
         if (!ggml_cannge_ge_dtype(GGML_TYPE_F32, f32)) {
             return ctx.fail("no GE f32 dtype for mixed mul_mat");
@@ -331,7 +324,14 @@ bool ggml_cannge_build_matmul(ggml_cannge_build_context & ctx, ggml_tensor * nod
         }
         es1 = cannge_es::Concat(ctx.scalar_cached((int64_t) 0), { es1, zeros }, 2);
     }
-    auto mm = cannge_es::BatchMatMulV3(es1, es0, nullptr, nullptr, false, true);
+    cannge_es::EsTensorHolder mm;
+    if (ggml_n_dims(src0) == 2 && ggml_n_dims(src1) == 2) {
+        if (!ggml_cannge_build_matmul_2d(ctx, es1, es0, mm)) {
+            return false;
+        }
+    } else {
+        mm = cannge_es::BatchMatMulV3(es1, es0, nullptr, nullptr, false, true);
+    }
     if (M_pad != M_in) {
         mm = cannge_es::Slice(mm, std::vector<int64_t>{ 0, 0 }, std::vector<int64_t>{ M_in, src0->ne[1] });
     }
