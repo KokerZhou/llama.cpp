@@ -6,6 +6,7 @@
 #include <graph/tensor.h>
 #include <acl/acl.h>
 #include <cmath>
+#include <charconv>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -23,9 +24,28 @@ static void check(ge::Status status, const char * phase) {
 }
 
 int main(int argc, char ** argv) {
-    const bool small = argc > 2 && std::strcmp(argv[2], "small") == 0;
-    const int64_t M = 16, N = small ? 16 : 4096, K = small ? 256 : 2560;
+    const int64_t M = 16;
+    int64_t N = 4096, K = 2560;
     const bool matmul = argc > 1 && std::strcmp(argv[1], "matmul") == 0;
+    bool valid = argc == 1 || (argc >= 2 && (matmul || std::strcmp(argv[1], "bmm") == 0));
+    if (argc == 3 && std::strcmp(argv[2], "small") == 0) {
+        N = 16; K = 256;
+    } else if (argc == 4) {
+        auto dimension = [](const char * text, int64_t & value) {
+            const char * end = text + std::strlen(text);
+            const auto result = std::from_chars(text, end, value);
+            return result.ec == std::errc() && result.ptr == end && value > 0 && value <= 8192;
+        };
+        valid = valid && dimension(argv[2], N) && dimension(argv[3], K);
+    } else if (argc > 2) {
+        valid = false;
+    }
+    if (!valid || N * K > 32 * 1024 * 1024) {
+        std::fprintf(stderr, "usage: %s [bmm|matmul [small|N K]]; dimensions 1..8192, N*K <= 33554432\n", argv[0]);
+        return 2;
+    }
+    std::fprintf(stderr, "probe op=%s M=%lld N=%lld K=%lld\n", matmul ? "MatMulV3" : "BatchMatMulV3",
+                 (long long) M, (long long) N, (long long) K);
     if (aclInit(nullptr) != 0 || aclrtSetDevice(0) != 0) return 2;
     std::map<ge::AscendString, ge::AscendString> options = {
         {"ge.exec.deviceId", "0"}, {"ge.graphRunMode", "0"},

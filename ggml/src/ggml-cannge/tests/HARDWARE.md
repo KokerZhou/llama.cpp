@@ -49,7 +49,21 @@ Check the actual executed and skipped case counts. A successful command with no 
 
 Run model-level prompt processing and repeated decode with CPU comparisons, including cache reuse and mixed CPU/CANNGE splits. Record the model and numerical comparison criteria before evaluating results. Operator tests alone do not prove model correctness.
 
-## Recovery
+## Reduced 310 matmul batch
+
+`run-ge-probes.py --plan` prints the four isolated shapes without SDK or device access. The direct probe also accepts `bmm N K` (M remains 16), preserving the existing default and `bmm small` commands. On the configured device host, source the installed SDK environment, then run:
+
+```sh
+python3 ggml/src/ggml-cannge/tests/run-ge-probes.py \
+  --sdk /usr/local/Ascend/ascend-toolkit/latest \
+  --output /workspace/cannge-matmul-batch-UNIQUE
+```
+
+The output directory must be new and outside the checkout. The runner builds the direct probe, records its hash and local Git/device provenance, and runs each shape in a separate process with graph dumps, compiler logs and exception collection. It performs no network operations or device resets. Source the SDK environment first; this runner does not install dependencies. Archives without Git metadata retain the probe hash but require the archive revision to be recorded separately.
+
+The passing small control is mandatory. A failed control or timeout stops the batch; ordinary failures in the other cases are recorded and the batch continues. The runner kills only its command's process group after each command to reclaim compiler children. Inspect `results.json`, recursive graph dump directories and logs, not just the runner's exit code. This batch intentionally uses uniform FP16 inputs and does not replace model accuracy, general format-conversion, recovery or performance validation.
+
+## Recovery checks
 
 Verify normal repeated backend creation/release and cache eviction on the real runtime. Use supported fault injection, if available, for stream drain, graph removal, allocation release and stream destruction failures. Confirm that retries preserve required resources, reclaim them after success, and do not execute partially released plans. Record unavailable fault injection as untested, not passed.
 
